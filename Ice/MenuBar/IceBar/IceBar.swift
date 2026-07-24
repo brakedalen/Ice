@@ -447,7 +447,13 @@ private struct IceBarItemView: View {
     }
 
     var body: some View {
-        if let image {
+        if item.tag.isIceSpacer {
+            // Spacers have no image; render them as the empty gap they
+            // represent so grouping carries over into the Ice Bar.
+            Color.clear
+                .frame(width: max(item.bounds.width, 1), height: 1)
+                .accessibilityHidden(true)
+        } else if let image {
             Image(nsImage: image)
                 .contentShape(Rectangle())
                 .overlay {
