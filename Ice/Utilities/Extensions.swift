@@ -547,6 +547,11 @@ extension NSScreen {
         )
     }
 
+    /// A Boolean value that indicates whether the screen is a built-in display (laptop screen).
+    var isBuiltIn: Bool {
+        CGDisplayIsBuiltin(displayID) != 0
+    }
+
     /// Returns the height of the menu bar on this screen.
     func getMenuBarHeight() -> CGFloat? {
         let menuBarWindow = WindowInfo.menuBarWindow(for: displayID)
