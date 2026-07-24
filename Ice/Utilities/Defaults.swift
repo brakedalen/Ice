@@ -176,6 +176,7 @@ extension Defaults {
         case automationWifiRule = "AutomationWifiRule"
         case automationPowerRule = "AutomationPowerRule"
         case automationRememberedPlacements = "AutomationRememberedPlacements"
+        case automationReturnAnchors = "AutomationReturnAnchors"
 
         // MARK: Migration
         case hasMigrated0_8_0 = "hasMigrated0_8_0"

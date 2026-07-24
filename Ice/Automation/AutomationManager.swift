@@ -69,6 +69,16 @@ final class AutomationManager: ObservableObject {
     /// Restores waiting to be executed, keyed by automation key.
     private var pendingRestores: [String: MenuBarSection.Name] = [:]
 
+    /// Return anchors for rule-governed items, keyed by automation key.
+    ///
+    /// When a rule shows an item, the item's neighbor in the hidden
+    /// section is recorded here (value format: `"L|<key>"` to place the
+    /// item left of the anchor, `"R|<key>"` for right). When the rule
+    /// hides the item again, it returns to its previous spot next to
+    /// that neighbor instead of being appended to the end of the
+    /// section.
+    private var returnAnchors: [String: String] = [:]
+
     /// Whether the first item cache snapshot has been processed.
     private var hasProcessedInitialSnapshot = false
 
@@ -90,6 +100,9 @@ final class AutomationManager: ObservableObject {
 
         if let stored = Defaults.dictionary(forKey: .automationRememberedPlacements) as? [String: String] {
             placements = stored
+        }
+        if let stored = Defaults.dictionary(forKey: .automationReturnAnchors) as? [String: String] {
+            returnAnchors = stored
         }
 
         systemMonitor.start()
@@ -195,10 +208,16 @@ final class AutomationManager: ObservableObject {
         // not by the placement memory.
         let ruleGovernedKeys = enabledRuleKeys(settings: settings)
 
-        // If a rule-governed item just (re)appeared, re-run the rules so
-        // it ends up in the section its rule wants.
+        // Run the rules when the first cache snapshot arrives (the
+        // condition publishers may have fired before any items were
+        // known, in which case that pass found nothing to move), and
+        // when a rule-governed item (re)appears.
         let appearedKeys = Set(appearedTags.compactMap { $0.automationKey })
-        if !isInitialSnapshot && !appearedKeys.isDisjoint(with: ruleGovernedKeys) {
+        if isInitialSnapshot {
+            if !ruleGovernedKeys.isEmpty {
+                requestEnforcement(reason: "initial rule enforcement")
+            }
+        } else if !appearedKeys.isDisjoint(with: ruleGovernedKeys) {
             requestEnforcement(reason: "rule-governed item appeared")
         }
 
@@ -299,6 +318,78 @@ final class AutomationManager: ObservableObject {
         return desired
     }
 
+    // MARK: Return Anchors
+
+    /// Records the neighbor of the given item in its current section, so
+    /// the item can later be returned to the same spot.
+    private func recordReturnAnchor(
+        for key: String,
+        item: MenuBarItem,
+        in section: MenuBarSection.Name,
+        cache: MenuBarItemManager.ItemCache,
+        governedKeys: Set<String>
+    ) {
+        let sectionItems = cache.managedItems(for: section)
+        guard let index = sectionItems.firstIndex(where: { $0.tag == item.tag }) else {
+            return
+        }
+
+        // Prefer the neighbor to the right, then the one to the left.
+        // Skip other rule-governed items; they may be moving too.
+        func eligibleAnchorKey(_ candidate: MenuBarItem) -> String? {
+            guard
+                let anchorKey = candidate.tag.automationKey,
+                !governedKeys.contains(anchorKey)
+            else {
+                return nil
+            }
+            return anchorKey
+        }
+
+        for rightIndex in sectionItems.index(after: index)..<sectionItems.endIndex {
+            if let anchorKey = eligibleAnchorKey(sectionItems[rightIndex]) {
+                returnAnchors[key] = "L|" + anchorKey
+                saveReturnAnchors()
+                return
+            }
+        }
+        for leftIndex in stride(from: index - 1, through: sectionItems.startIndex, by: -1) {
+            if let anchorKey = eligibleAnchorKey(sectionItems[leftIndex]) {
+                returnAnchors[key] = "R|" + anchorKey
+                saveReturnAnchors()
+                return
+            }
+        }
+    }
+
+    /// Resolves the stored return anchor for the given item into a move
+    /// destination, if the anchor is currently in the hidden section.
+    private func resolveReturnDestination(
+        for key: String,
+        items: [MenuBarItem],
+        cache: MenuBarItemManager.ItemCache
+    ) -> MenuBarItemManager.MoveDestination? {
+        guard
+            let stored = returnAnchors[key],
+            let separatorIndex = stored.firstIndex(of: "|")
+        else {
+            return nil
+        }
+        let side = stored[..<separatorIndex]
+        let anchorKey = String(stored[stored.index(after: separatorIndex)...])
+        guard
+            let anchor = items.first(where: { $0.tag.automationKey == anchorKey }),
+            cache.address(for: anchor.tag)?.section == .hidden
+        else {
+            return nil
+        }
+        return side == "L" ? .leftOfItem(anchor) : .rightOfItem(anchor)
+    }
+
+    private func saveReturnAnchors() {
+        Defaults.set(returnAnchors, forKey: .automationReturnAnchors)
+    }
+
     // MARK: Enforcement
 
     /// Requests an enforcement pass. Passes are strictly serialized;
@@ -374,17 +465,24 @@ final class AutomationManager: ObservableObject {
                 }
 
                 // Verify against the authoritative cache before moving.
-                let currentSection = appState.itemManager.itemCache.address(for: item.tag)?.section
+                let cache = appState.itemManager.itemCache
+                let currentSection = cache.address(for: item.tag)?.section
                 guard currentSection != targetSection else {
                     desired.removeValue(forKey: key)
                     continue
+                }
+
+                // Before showing an item, remember which neighbor it sat
+                // next to so it can return to the same spot later.
+                if targetSection == .visible, let currentSection {
+                    recordReturnAnchor(for: key, item: item, in: currentSection, cache: cache, governedKeys: enabledRuleKeys(settings: settings))
                 }
 
                 let destination: MenuBarItemManager.MoveDestination = switch targetSection {
                 case .visible:
                     .rightOfItem(hiddenControlItem)
                 case .hidden:
-                    .leftOfItem(hiddenControlItem)
+                    resolveReturnDestination(for: key, items: items, cache: cache) ?? .leftOfItem(hiddenControlItem)
                 case .alwaysHidden:
                     // Fall back to the hidden section if the
                     // always-hidden section is disabled.

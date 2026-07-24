@@ -18,14 +18,16 @@ struct AutomationSettingsPane: View {
             IceSection("Wi-Fi Rule") {
                 AutomationRuleView(
                     rule: $settings.wifiRule,
-                    conditionName: "connected to Wi-Fi",
+                    optionWhenMet: "Connected to Wi-Fi",
+                    optionWhenNotMet: "Not connected to Wi-Fi",
                     statusText: wifiStatusText
                 )
             }
             IceSection("Power Rule") {
                 AutomationRuleView(
                     rule: $settings.powerRule,
-                    conditionName: "connected to power",
+                    optionWhenMet: "Connected to power",
+                    optionWhenNotMet: "On battery",
                     statusText: powerStatusText
                 )
             }
@@ -67,7 +69,8 @@ struct AutomationSettingsPane: View {
 
 private struct AutomationRuleView: View {
     @Binding var rule: AutomationRule
-    let conditionName: String
+    let optionWhenMet: String
+    let optionWhenNotMet: String
     let statusText: String
 
     var body: some View {
@@ -81,15 +84,21 @@ private struct AutomationRuleView: View {
 
         if rule.isEnabled {
             IcePicker(
-                "Action",
+                "Show items when",
                 selection: $rule.action
             ) {
-                Text("Show selected items when \(conditionName)")
+                Text(LocalizedStringKey(optionWhenMet))
                     .tag(AutomationRule.Action.showWhenMet)
-                Text("Hide selected items when \(conditionName)")
+                Text(LocalizedStringKey(optionWhenNotMet))
                     .tag(AutomationRule.Action.hideWhenMet)
             }
-            .annotation("Items move to the hidden section when they are not shown.")
+            .annotation(
+                """
+                Selected items appear at the left edge of the menu bar while the \
+                condition matches, and return to their previous spot in the hidden \
+                section when it no longer does.
+                """
+            )
 
             AutomationItemPicker(selection: $rule.itemKeys)
         }
@@ -164,15 +173,24 @@ private struct AutomationItemPickerContent: View {
 
     @ViewBuilder
     private func itemImageView(for item: MenuBarItem) -> some View {
-        if let captured = imageCache.images[item.tag] {
-            Image(nsImage: captured.nsImage)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(height: 18)
-        } else {
-            Image(systemName: "square.dashed")
-                .frame(height: 18)
+        // Menu bar item captures are rendered for the menu bar's dark
+        // appearance, so draw them on a dark chip to keep them visible
+        // against the settings window's light background.
+        ZStack {
+            RoundedRectangle(cornerRadius: 5)
+                .fill(Color.black.opacity(0.72))
+            if let captured = imageCache.images[item.tag] {
+                Image(nsImage: captured.nsImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(height: 17)
+                    .padding(.horizontal, 3)
+            } else {
+                Image(systemName: "square.dashed")
+                    .foregroundStyle(.white.opacity(0.8))
+            }
         }
+        .frame(width: 34, height: 22)
     }
 
     private func bindingForItem(withKey key: String) -> Binding<Bool> {
