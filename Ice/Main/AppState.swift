@@ -46,6 +46,9 @@ final class AppState: ObservableObject {
     /// Manager for menu bar item automation.
     let automationManager = AutomationManager()
 
+    /// Manager for menu bar spacers.
+    let spacersManager = MenuBarSpacersManager()
+
     /// Manager for app updates.
     let updatesManager = UpdatesManager()
 
@@ -72,6 +75,7 @@ final class AppState: ObservableObject {
         await itemManager.performSetup(with: self)
         imageCache.performSetup(with: self)
         automationManager.performSetup(with: self)
+        spacersManager.performSetup(with: self)
         updatesManager.performSetup(with: self)
         userNotificationManager.performSetup(with: self)
 

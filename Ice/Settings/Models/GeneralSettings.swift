@@ -13,6 +13,12 @@ import SwiftUI
 /// Model for the app's General settings.
 @MainActor
 final class GeneralSettings: ObservableObject {
+    /// A user-configured menu bar spacer.
+    struct MenuBarSpacer: Codable, Hashable, Identifiable {
+        var id = UUID()
+        var width = 24
+    }
+
     /// A Boolean value that indicates whether the Ice icon
     /// should be shown.
     @Published var showIceIcon = true
@@ -64,6 +70,14 @@ final class GeneralSettings: ObservableObject {
     /// The offset to apply to the menu bar item spacing and padding.
     @Published var itemSpacingOffset: Double = 0
 
+    /// The user's menu bar spacers, used to insert empty space
+    /// between menu bar items.
+    @Published var menuBarSpacers: [MenuBarSpacer] = []
+
+    /// A Boolean value that indicates whether spacers display a faint
+    /// marker so they can be located and repositioned.
+    @Published var showSpacerMarkers = true
+
     /// A Boolean value that indicates whether the hidden section
     /// should automatically rehide.
     @Published var autoRehide = true
@@ -83,6 +97,8 @@ final class GeneralSettings: ObservableObject {
 
     /// Storage for internal observers.
     private var cancellables = Set<AnyCancellable>()
+
+    private let logger = Logger(category: "GeneralSettings")
 
     /// The shared app state.
     private(set) weak var appState: AppState?
@@ -111,6 +127,14 @@ final class GeneralSettings: ObservableObject {
         Defaults.ifPresent(key: .showOnHover, assign: &showOnHover)
         Defaults.ifPresent(key: .showOnScroll, assign: &showOnScroll)
         Defaults.ifPresent(key: .itemSpacingOffset, assign: &itemSpacingOffset)
+        Defaults.ifPresent(key: .showSpacerMarkers, assign: &showSpacerMarkers)
+        if let data = Defaults.data(forKey: .menuBarSpacers) {
+            do {
+                menuBarSpacers = try JSONDecoder().decode([MenuBarSpacer].self, from: data)
+            } catch {
+                logger.error("Failed to decode menu bar spacers: \(error, privacy: .public)")
+            }
+        }
         Defaults.ifPresent(key: .autoRehide, assign: &autoRehide)
         Defaults.ifPresent(key: .rehideInterval, assign: &rehideInterval)
 
@@ -231,6 +255,25 @@ final class GeneralSettings: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { showOnScroll in
                 Defaults.set(showOnScroll, forKey: .showOnScroll)
+            }
+            .store(in: &c)
+
+        $menuBarSpacers
+            .receive(on: DispatchQueue.main)
+            .sink { spacers in
+                do {
+                    let data = try JSONEncoder().encode(spacers)
+                    Defaults.set(data, forKey: .menuBarSpacers)
+                } catch {
+                    Logger(category: "GeneralSettings").error("Failed to encode menu bar spacers: \(error, privacy: .public)")
+                }
+            }
+            .store(in: &c)
+
+        $showSpacerMarkers
+            .receive(on: DispatchQueue.main)
+            .sink { show in
+                Defaults.set(show, forKey: .showSpacerMarkers)
             }
             .store(in: &c)
 

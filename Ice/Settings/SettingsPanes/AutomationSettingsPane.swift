@@ -126,6 +126,7 @@ private struct AutomationItemPickerContent: View {
                 guard
                     item.isMovable,
                     item.canBeHidden,
+                    item.tag.namespace != .ice,
                     let key = item.tag.automationKey,
                     !seen.contains(key)
                 else {

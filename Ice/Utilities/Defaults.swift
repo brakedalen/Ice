@@ -153,6 +153,8 @@ extension Defaults {
         case rehideStrategy = "RehideStrategy"
         case rehideInterval = "RehideInterval"
         case itemSpacingOffset = "ItemSpacingOffset"
+        case menuBarSpacers = "MenuBarSpacers"
+        case showSpacerMarkers = "ShowSpacerMarkers"
 
         // MARK: Hotkeys Settings
         case hotkeys = "Hotkeys"
