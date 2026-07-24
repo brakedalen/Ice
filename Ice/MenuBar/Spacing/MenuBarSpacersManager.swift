@@ -36,7 +36,10 @@ extension MenuBarItemTag {
 @MainActor
 final class MenuBarSpacersManager {
     /// The prefix used for spacer autosave names.
-    static let autosaveNamePrefix = "IceSpacer-"
+    ///
+    /// Nonisolated so the tag helpers above can read it from any context;
+    /// it is an immutable constant, which makes that safe.
+    nonisolated static let autosaveNamePrefix = "IceSpacer-"
 
     /// The status items for the current spacers, keyed by spacer ID.
     private var statusItems = [UUID: NSStatusItem]()
