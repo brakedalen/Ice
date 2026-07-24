@@ -68,8 +68,27 @@ final class MenuBarSpacersManager {
 
     private func createStatusItem(for spacer: GeneralSettings.MenuBarSpacer) -> NSStatusItem {
         logger.info("Creating spacer \(spacer.id.uuidString, privacy: .public) with width \(spacer.width, privacy: .public)")
+
+        let autosaveName = Self.autosaveNamePrefix + spacer.id.uuidString
+
+        // New status items are inserted at the far left of the menu bar,
+        // which is inside the hidden (or always-hidden) section — where a
+        // brand new spacer would be invisible. Seed the preferred position
+        // of first-time spacers to just inside the visible section, so the
+        // user immediately sees what they created and can drag it from
+        // there.
+        if ControlItemDefaults[.preferredPosition, autosaveName] == nil {
+            let hiddenDividerPosition = ControlItemDefaults[
+                .preferredPosition,
+                ControlItem.Identifier.hidden.rawValue
+            ]
+            if let hiddenDividerPosition {
+                ControlItemDefaults[.preferredPosition, autosaveName] = max(hiddenDividerPosition - 1, 0)
+            }
+        }
+
         let statusItem = NSStatusBar.system.statusItem(withLength: CGFloat(spacer.width))
-        statusItem.autosaveName = Self.autosaveNamePrefix + spacer.id.uuidString
+        statusItem.autosaveName = autosaveName
         statusItems[spacer.id] = statusItem
         return statusItem
     }
@@ -80,9 +99,9 @@ final class MenuBarSpacersManager {
         }
         if showMarkers {
             let image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Spacer")?
-                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 4, weight: .regular))
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 6, weight: .bold))
             button.image = image
-            button.alphaValue = 0.4
+            button.alphaValue = 0.5
         } else {
             button.image = nil
             button.alphaValue = 1
