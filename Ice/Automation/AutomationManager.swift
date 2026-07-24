@@ -131,7 +131,7 @@ final class AutomationManager: ObservableObject {
             systemMonitor.$isOnExternalPower.removeDuplicates()
         )
         .dropFirst()
-        .debounce(for: .seconds(2), scheduler: DispatchQueue.main)
+        .debounce(for: .seconds(1), scheduler: DispatchQueue.main)
         .sink { [weak self] _, _ in
             self?.requestEnforcement(reason: "system condition changed")
         }
@@ -423,7 +423,7 @@ final class AutomationManager: ObservableObject {
 
         // Let the menu bar settle before touching anything. Newly
         // launched apps may still be adjusting their own items.
-        try? await Task.sleep(for: .seconds(3))
+        try? await Task.sleep(for: .seconds(1))
 
         let settings = appState.settings.automation
 
@@ -435,6 +435,12 @@ final class AutomationManager: ObservableObject {
         }
 
         guard !desired.isEmpty else {
+            logger.info(
+                """
+                Enforcement: nothing to move (Wi-Fi: \(String(describing: self.systemMonitor.isWiFiConnected), privacy: .public), \
+                power: \(String(describing: self.systemMonitor.isOnExternalPower), privacy: .public))
+                """
+            )
             return
         }
 

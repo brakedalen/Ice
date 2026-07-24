@@ -82,20 +82,24 @@ final class SystemStateMonitor: ObservableObject {
             }
         }
 
-        guard let source = IOPSNotificationCreateRunLoopSource(callback, context)?.takeRetainedValue() else {
-            // Extremely unlikely. Fall back to a slow poll so the feature
-            // keeps working rather than silently dying.
-            logger.error("Failed to create power source run loop source, falling back to polling")
-            Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-                Task { @MainActor in
-                    self?.refreshPowerState()
-                }
-            }
-            return
+        if let source = IOPSNotificationCreateRunLoopSource(callback, context)?.takeRetainedValue() {
+            powerRunLoopSource = source
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
+        } else {
+            logger.error("Failed to create power source run loop source")
         }
 
-        powerRunLoopSource = source
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
+        // Belt and braces: also poll on a slow interval. The reading is
+        // idempotent and only publishes on change, so this is free — and
+        // it guarantees the state can never silently go stale even if a
+        // notification is ever missed.
+        let timer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshPowerState()
+            }
+        }
+        timer.tolerance = 5
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func refreshPowerState() {
