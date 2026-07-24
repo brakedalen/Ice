@@ -1081,6 +1081,15 @@ extension MenuBarItemManager {
             throw EventError.cannotComplete
         }
 
+        // Ice's own spacers cannot be moved with synthesized events: the
+        // events target the item's owning process, which is Ice itself,
+        // and time out against this very operation. Since Ice owns the
+        // item, reposition it directly instead.
+        if item.tag.isIceSpacer {
+            try appState.spacersManager.repositionSpacer(item: item, to: destination)
+            return
+        }
+
         try await waitForUserToPauseInput()
 
         appState.hidEventManager.stopAll()

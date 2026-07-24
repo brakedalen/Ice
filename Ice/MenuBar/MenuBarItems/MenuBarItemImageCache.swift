@@ -219,7 +219,10 @@ final class MenuBarItemImageCache: ObservableObject {
     /// Captures the images of the menu bar items in the given section and returns
     /// a dictionary containing the images, keyed by their menu bar item tags.
     private func captureImages(for section: MenuBarSection.Name, scale: CGFloat, appState: AppState) async -> [MenuBarItemTag: CapturedImage] {
-        let items = await appState.itemManager.itemCache.managedItems(for: section)
+        // Ice's own spacers are empty and can never be captured. The layout
+        // bar draws its own representation for them, so don't waste capture
+        // attempts (and log spam) on them.
+        let items = await appState.itemManager.itemCache.managedItems(for: section).filter { !$0.tag.isIceSpacer }
         let captureResult = await captureImages(of: items, scale: scale, appState: appState)
         if !captureResult.excluded.isEmpty {
             logger.error("Some items failed capture: \(captureResult.excluded, privacy: .public)")
