@@ -169,6 +169,12 @@ extension Defaults {
         // MARK: Appearance Settings
         case menuBarAppearanceConfigurationV2 = "MenuBarAppearanceConfigurationV2"
 
+        // MARK: Automation Settings
+        case automationRememberItemPositions = "AutomationRememberItemPositions"
+        case automationWifiRule = "AutomationWifiRule"
+        case automationPowerRule = "AutomationPowerRule"
+        case automationRememberedPlacements = "AutomationRememberedPlacements"
+
         // MARK: Migration
         case hasMigrated0_8_0 = "hasMigrated0_8_0"
         case hasMigrated0_10_0 = "hasMigrated0_10_0"

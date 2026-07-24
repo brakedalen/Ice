@@ -43,6 +43,9 @@ final class AppState: ObservableObject {
     /// Manager for input events received by the app.
     let hidEventManager = HIDEventManager()
 
+    /// Manager for menu bar item automation.
+    let automationManager = AutomationManager()
+
     /// Manager for app updates.
     let updatesManager = UpdatesManager()
 
@@ -68,6 +71,7 @@ final class AppState: ObservableObject {
         hidEventManager.performSetup(with: self)
         await itemManager.performSetup(with: self)
         imageCache.performSetup(with: self)
+        automationManager.performSetup(with: self)
         updatesManager.performSetup(with: self)
         userNotificationManager.performSetup(with: self)
 

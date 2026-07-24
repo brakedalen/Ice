@@ -11,6 +11,9 @@ final class AppSettings: ObservableObject {
     /// The model for the app's Advanced settings.
     let advanced = AdvancedSettings()
 
+    /// The model for the app's Automation settings.
+    let automation = AutomationSettings()
+
     /// The model for the app's General settings.
     let general = GeneralSettings()
 
@@ -23,6 +26,7 @@ final class AppSettings: ObservableObject {
     /// Performs the initial setup of the settings model.
     func performSetup(with appState: AppState) {
         advanced.performSetup(with: appState)
+        automation.performSetup(with: appState)
         general.performSetup(with: appState)
         hotkeys.performSetup(with: appState)
         configureCancellables()
@@ -32,6 +36,11 @@ final class AppSettings: ObservableObject {
         var c = Set<AnyCancellable>()
 
         advanced.objectWillChange
+            .sink { [weak self] in
+                self?.objectWillChange.send()
+            }
+            .store(in: &c)
+        automation.objectWillChange
             .sink { [weak self] in
                 self?.objectWillChange.send()
             }
