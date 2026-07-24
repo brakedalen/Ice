@@ -89,6 +89,10 @@ final class AutomationManager: ObservableObject {
     /// already running.
     private var needsAnotherPass = false
 
+    /// Consecutive enforcement passes that ended with failures. Used to
+    /// bound the retry backoff; reset on success and on new triggers.
+    private var consecutiveFailedPasses = 0
+
     /// Storage for internal observers.
     private var cancellables = Set<AnyCancellable>()
 
@@ -396,6 +400,9 @@ final class AutomationManager: ObservableObject {
     /// if one is already running, another is queued to run after it.
     private func requestEnforcement(reason: String) {
         logger.info("Enforcement requested: \(reason, privacy: .public)")
+        if reason != "retry after failure" {
+            consecutiveFailedPasses = 0
+        }
         if isEnforcing {
             needsAnotherPass = true
             return
@@ -451,11 +458,19 @@ final class AutomationManager: ObservableObject {
             failedMoves = 0
 
             // Fetch a fresh list of items each attempt so positions
-            // and windows are current.
-            let items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+            // and windows are current. No list option: offscreen (stashed)
+            // items and control items must always be included.
+            let items = await MenuBarItem.getMenuBarItems(option: [])
 
             guard let hiddenControlItem = items.first(matching: .hiddenControlItem) else {
-                logger.warning("Hidden control item not found, cannot enforce placements")
+                // The menu bar can be momentarily unreadable (e.g. while
+                // the item cache is rebuilding). Never give up: put the
+                // work back and retry shortly.
+                logger.warning("Hidden control item not found, retrying enforcement shortly")
+                for (key, section) in desired where pendingRestores[key] == nil {
+                    pendingRestores[key] = section
+                }
+                scheduleRetry()
                 return
             }
             let alwaysHiddenControlItem = items.first(matching: .alwaysHiddenControlItem)
@@ -537,6 +552,28 @@ final class AutomationManager: ObservableObject {
                 \(failedMoves, privacy: .public) failed
                 """
             )
+        }
+
+        if failedMoves > 0 {
+            scheduleRetry()
+        } else {
+            consecutiveFailedPasses = 0
+        }
+    }
+
+    /// Schedules a bounded retry of the enforcement pass. The desired
+    /// state is recomputed from the live conditions on each pass, so
+    /// retrying is always safe.
+    private func scheduleRetry() {
+        consecutiveFailedPasses += 1
+        guard consecutiveFailedPasses <= 6 else {
+            logger.error("Giving up enforcement retries until the next trigger")
+            return
+        }
+        let delay = Duration.seconds(min(5 * consecutiveFailedPasses, 30))
+        Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            self?.requestEnforcement(reason: "retry after failure")
         }
     }
 }

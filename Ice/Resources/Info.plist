@@ -3,7 +3,9 @@
 <plist version="1.0">
 <dict>
 	<key>SUFeedURL</key>
-	<string>https://jordanbaird.github.io/ice-releases/appcast.xml</string>
+	<string>https://brakedalen.github.io/ice-releases/appcast.xml</string>
+	<key>SUEnableAutomaticChecks</key>
+	<false/>
 	<key>SUPublicEDKey</key>
 	<string>3nfIGMOD8DALPE8vIdFo2tUOIVc2MVbzhc+2J9JLn+Q=</string>
 </dict>

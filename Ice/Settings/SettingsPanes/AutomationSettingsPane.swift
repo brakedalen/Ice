@@ -110,13 +110,90 @@ private struct AutomationRuleView: View {
 private struct AutomationItemPicker: View {
     @EnvironmentObject var appState: AppState
     @Binding var selection: Set<String>
+    @State private var isChoosingItems = false
 
     var body: some View {
-        AutomationItemPickerContent(
-            itemManager: appState.itemManager,
-            imageCache: appState.imageCache,
-            selection: $selection
-        )
+        LabeledContent {
+            Button("Choose Items…") {
+                isChoosingItems = true
+            }
+            .popover(isPresented: $isChoosingItems, arrowEdge: .bottom) {
+                ScrollView {
+                    AutomationItemPickerContent(
+                        itemManager: appState.itemManager,
+                        imageCache: appState.imageCache,
+                        selection: $selection
+                    )
+                    .padding()
+                }
+                .frame(width: 320, height: 380)
+            }
+        } label: {
+            AutomationSelectedItemsSummary(
+                itemManager: appState.itemManager,
+                imageCache: appState.imageCache,
+                selection: selection
+            )
+        }
+    }
+}
+
+// MARK: - AutomationSelectedItemsSummary
+
+private struct AutomationSelectedItemsSummary: View {
+    @ObservedObject var itemManager: MenuBarItemManager
+    @ObservedObject var imageCache: MenuBarItemImageCache
+
+    let selection: Set<String>
+
+    /// The currently selected items that exist in the menu bar.
+    private var selectedItems: [MenuBarItem] {
+        var seen = Set<String>()
+        var results = [MenuBarItem]()
+        for section in MenuBarSection.Name.allCases {
+            for item in itemManager.itemCache.managedItems(for: section) {
+                guard
+                    let key = item.tag.automationKey,
+                    selection.contains(key),
+                    !seen.contains(key)
+                else {
+                    continue
+                }
+                seen.insert(key)
+                results.append(item)
+            }
+        }
+        return results
+    }
+
+    var body: some View {
+        if selection.isEmpty {
+            Text("No items selected")
+                .foregroundStyle(.secondary)
+        } else {
+            HStack(spacing: 4) {
+                ForEach(selectedItems, id: \.windowID) { item in
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(Color.black.opacity(0.72))
+                        if let captured = imageCache.images[item.tag] {
+                            Image(nsImage: captured.nsImage)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(height: 17)
+                                .padding(.horizontal, 3)
+                        }
+                    }
+                    .frame(width: 30, height: 22)
+                    .help(item.displayName)
+                }
+                if selectedItems.count < selection.count {
+                    Text("+\(selection.count - selectedItems.count) not running")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
     }
 }
 
