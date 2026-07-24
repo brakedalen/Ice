@@ -176,7 +176,8 @@ extension HIDEventManager {
     private func handleShowOnClick(appState: AppState, screen: NSScreen) {
         guard
             appState.settings.general.showOnClick,
-            isMouseInsideEmptyMenuBarSpace(appState: appState, screen: screen)
+            isMouseInsideEmptyMenuBarSpace(appState: appState, screen: screen),
+            !isMouseInsideOverlayAboveMenuBar(appState: appState, screen: screen)
         else {
             return
         }
@@ -516,6 +517,24 @@ extension HIDEventManager {
         }
         frameOfNotch.size.height += 1
         return frameOfNotch.contains(mouseLocation)
+    }
+
+    /// A Boolean value that indicates whether the mouse pointer is occluded
+    /// by a third-party window whose level is above the menu bar, such as a
+    /// full-screen overlay drawn on top of it.
+    func isMouseInsideOverlayAboveMenuBar(appState: AppState, screen: NSScreen) -> Bool {
+        guard let mouseLocation = MouseHelpers.locationCoreGraphics else {
+            return false
+        }
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let menuBarLevel = Int(CGWindowLevelForKey(.mainMenuWindow))
+        let cursorLevel = Int(CGWindowLevelForKey(.cursorWindow))
+        return WindowInfo.createWindows(option: .onScreen).contains { window in
+            window.ownerPID != pid &&
+            window.layer > menuBarLevel &&
+            window.layer < cursorLevel &&
+            window.bounds.contains(mouseLocation)
+        }
     }
 
     /// A Boolean value that indicates whether the mouse pointer is within
