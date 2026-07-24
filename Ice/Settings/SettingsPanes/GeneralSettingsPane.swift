@@ -53,9 +53,6 @@ struct GeneralSettingsPane: View {
             IceSection {
                 spacingOptions
             }
-            IceSection("Menu Bar Spacers") {
-                spacersOptions
-            }
         }
     }
 
@@ -362,46 +359,6 @@ struct GeneralSettingsPane: View {
         .onAppear {
             tempItemSpacingOffset = settings.itemSpacingOffset
         }
-    }
-
-    // MARK: Spacers Options
-
-    @ViewBuilder
-    private var spacersOptions: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Spacers add empty space between menu bar items, letting you group them visually. ⌘ Command + drag a spacer to position it.")
-                .foregroundStyle(.secondary)
-
-            ForEach($settings.menuBarSpacers) { $spacer in
-                HStack {
-                    Image(systemName: "space")
-                    IcePicker("Width", selection: $spacer.width) {
-                        ForEach([12, 16, 24, 32, 48, 64], id: \.self) { width in
-                            Text("\(width) px").tag(width)
-                        }
-                    }
-                    .frame(maxWidth: 150)
-
-                    Spacer()
-
-                    Button {
-                        settings.menuBarSpacers.removeAll { $0.id == spacer.id }
-                    } label: {
-                        Image(systemName: "trash")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Remove this spacer")
-                }
-            }
-
-            Button("Add Spacer") {
-                settings.menuBarSpacers.append(GeneralSettings.MenuBarSpacer())
-            }
-            .disabled(settings.menuBarSpacers.count >= 10)
-        }
-
-        Toggle("Show spacer markers", isOn: $settings.showSpacerMarkers)
-            .annotation("Markers show a faint dot where each spacer sits, making them easy to find and drag. Turn this off once your spacers are in place.")
     }
 
     private func applyTempItemSpacingOffset() {

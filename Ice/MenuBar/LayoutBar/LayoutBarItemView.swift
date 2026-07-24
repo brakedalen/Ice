@@ -68,7 +68,7 @@ final class LayoutBarItemView: NSView {
         super.init(frame: CGRect(origin: .zero, size: item.bounds.size))
         unregisterDraggedTypes()
 
-        self.toolTip = item.displayName
+        self.toolTip = item.tag.isIceSpacer ? "Spacer" : item.displayName
         self.isEnabled = item.isMovable
 
         configureCancellables()
@@ -85,7 +85,11 @@ final class LayoutBarItemView: NSView {
         if let appState {
             appState.imageCache.$images
                 .sink { [weak self] images in
-                    guard let self, let cachedImage = images[item.tag] else {
+                    guard
+                        let self,
+                        !item.tag.isIceSpacer,
+                        let cachedImage = images[item.tag]
+                    else {
                         return
                     }
                     self.cachedImage = cachedImage
@@ -111,7 +115,40 @@ final class LayoutBarItemView: NSView {
         return alert
     }
 
+    /// Draws a visible stand-in for a spacer, which is empty in the
+    /// real menu bar and would otherwise be invisible in the layout bar.
+    private func drawSpacerRepresentation() {
+        guard !isDraggingPlaceholder else {
+            return
+        }
+
+        let inset = bounds.insetBy(dx: 2, dy: 3)
+        let path = NSBezierPath(roundedRect: inset, xRadius: 4, yRadius: 4)
+        path.setLineDash([3, 2], count: 2, phase: 0)
+        path.lineWidth = 1
+        NSColor.secondaryLabelColor.withAlphaComponent(0.9).setStroke()
+        path.stroke()
+
+        if
+            let symbol = NSImage(systemSymbolName: "arrow.left.and.right", accessibilityDescription: "Spacer")?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 9, weight: .medium))
+        {
+            let symbolSize = symbol.size
+            let symbolRect = NSRect(
+                x: bounds.midX - symbolSize.width / 2,
+                y: bounds.midY - symbolSize.height / 2,
+                width: symbolSize.width,
+                height: symbolSize.height
+            )
+            symbol.draw(in: symbolRect, from: .zero, operation: .sourceOver, fraction: 0.6)
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
+        if item.tag.isIceSpacer {
+            drawSpacerRepresentation()
+            return
+        }
         if !isDraggingPlaceholder {
             cachedImage?.nsImage.draw(
                 in: bounds,

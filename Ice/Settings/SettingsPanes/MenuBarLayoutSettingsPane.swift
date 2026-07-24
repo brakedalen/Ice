@@ -22,6 +22,7 @@ struct MenuBarLayoutSettingsPane: View {
             IceForm(spacing: 20) {
                 header
                 layoutBars
+                spacersSection
             }
         }
     }
@@ -54,6 +55,13 @@ struct MenuBarLayoutSettingsPane: View {
             if !hasItems {
                 loadingMenuBarItems
             }
+        }
+    }
+
+    @ViewBuilder
+    private var spacersSection: some View {
+        IceSection("Spacers") {
+            MenuBarSpacersSection(settings: appState.settings.general)
         }
     }
 
@@ -110,6 +118,49 @@ struct MenuBarLayoutSettingsPane: View {
 
                 LayoutBar(imageCache: appState.imageCache, section: name)
             }
+        }
+    }
+}
+
+
+// MARK: - MenuBarSpacersSection
+
+private struct MenuBarSpacersSection: View {
+    @ObservedObject var settings: GeneralSettings
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Spacers add empty space between menu bar items, letting you group them visually. New spacers appear in the visible section — drag them into position above, or ⌘ Command + drag them in the menu bar.")
+                .foregroundStyle(.secondary)
+
+            ForEach($settings.menuBarSpacers) { $spacer in
+                HStack {
+                    Image(systemName: "arrow.left.and.right.square")
+                    IcePicker("Width", selection: $spacer.width) {
+                        ForEach([12, 16, 24, 32, 48, 64], id: \.self) { width in
+                            Text("\(width) px").tag(width)
+                        }
+                    }
+                    .frame(maxWidth: 150)
+
+                    Spacer()
+
+                    Button {
+                        settings.menuBarSpacers.removeAll { $0.id == spacer.id }
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Remove this spacer")
+                }
+            }
+
+            Button("Add Spacer") {
+                settings.menuBarSpacers.append(GeneralSettings.MenuBarSpacer())
+            }
+            .disabled(settings.menuBarSpacers.count >= 10)
+
+            Toggle("Show spacer markers", isOn: $settings.showSpacerMarkers)
         }
     }
 }

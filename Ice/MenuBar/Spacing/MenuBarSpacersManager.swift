@@ -7,6 +7,16 @@ import Cocoa
 import Combine
 import OSLog
 
+// MARK: - MenuBarItemTag + isIceSpacer
+
+extension MenuBarItemTag {
+    /// A Boolean value that indicates whether the item identified by
+    /// this tag is a menu bar spacer owned by Ice.
+    var isIceSpacer: Bool {
+        namespace == .ice && title.hasPrefix(MenuBarSpacersManager.autosaveNamePrefix)
+    }
+}
+
 /// Manages the user's menu bar spacers.
 ///
 /// A spacer is an empty status item with a fixed width, used to insert
