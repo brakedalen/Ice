@@ -15,6 +15,15 @@ extension MenuBarItemTag {
     var isIceSpacer: Bool {
         namespace == .ice && title.hasPrefix(MenuBarSpacersManager.autosaveNamePrefix)
     }
+
+    /// The identifier of the spacer represented by this tag, or `nil`
+    /// if the tag does not represent a spacer.
+    var iceSpacerID: UUID? {
+        guard isIceSpacer else {
+            return nil
+        }
+        return UUID(uuidString: String(title.dropFirst(MenuBarSpacersManager.autosaveNamePrefix.count)))
+    }
 }
 
 /// Manages the user's menu bar spacers.
@@ -69,10 +78,10 @@ final class MenuBarSpacersManager {
         }
 
         // Create or update the rest.
-        for spacer in spacers {
+        for (index, spacer) in spacers.enumerated() {
             let statusItem = statusItems[spacer.id] ?? createStatusItem(for: spacer)
             statusItem.length = CGFloat(spacer.width)
-            configureButton(of: statusItem, showMarkers: showMarkers)
+            configureButton(of: statusItem, number: index + 1, showMarkers: showMarkers)
         }
     }
 
@@ -118,15 +127,15 @@ final class MenuBarSpacersManager {
     /// no events are needed at all: write the position macOS should use
     /// and recreate the item, the same mechanism used at every launch.
     func repositionSpacer(item: MenuBarItem, to destination: MenuBarItemManager.MoveDestination) throws {
-        let title = item.tag.title
         guard
-            title.hasPrefix(Self.autosaveNamePrefix),
-            let id = UUID(uuidString: String(title.dropFirst(Self.autosaveNamePrefix.count))),
+            let id = item.tag.iceSpacerID,
             let statusItem = statusItems[id],
-            let spacer = appState?.settings.general.menuBarSpacers.first(where: { $0.id == id })
+            let spacers = appState?.settings.general.menuBarSpacers,
+            let index = spacers.firstIndex(where: { $0.id == id })
         else {
             throw RepositionError(description: "No managed spacer for tag \(item.tag)")
         }
+        let spacer = spacers[index]
 
         let target = destination.targetItem
 
@@ -165,20 +174,21 @@ final class MenuBarSpacersManager {
         let newStatusItem = NSStatusBar.system.statusItem(withLength: CGFloat(spacer.width))
         newStatusItem.autosaveName = autosaveName
         statusItems[id] = newStatusItem
-        configureButton(of: newStatusItem, showMarkers: showMarkers)
+        configureButton(of: newStatusItem, number: index + 1, showMarkers: showMarkers)
     }
 
-    private func configureButton(of statusItem: NSStatusItem, showMarkers: Bool) {
+    private func configureButton(of statusItem: NSStatusItem, number: Int, showMarkers: Bool) {
         guard let button = statusItem.button else {
             return
         }
         if showMarkers {
-            let image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Spacer")?
-                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 6, weight: .bold))
-            button.image = image
+            button.attributedTitle = NSAttributedString(
+                string: String(number),
+                attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .semibold)]
+            )
             button.alphaValue = 0.5
         } else {
-            button.image = nil
+            button.attributedTitle = NSAttributedString(string: "")
             button.alphaValue = 1
         }
     }

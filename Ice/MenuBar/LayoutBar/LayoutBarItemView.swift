@@ -68,7 +68,15 @@ final class LayoutBarItemView: NSView {
         super.init(frame: CGRect(origin: .zero, size: item.bounds.size))
         unregisterDraggedTypes()
 
-        self.toolTip = item.tag.isIceSpacer ? "Spacer" : item.displayName
+        self.toolTip = {
+            if let id = item.tag.iceSpacerID {
+                if let index = appState.settings.general.menuBarSpacers.firstIndex(where: { $0.id == id }) {
+                    return "Spacer \(index + 1)"
+                }
+                return "Spacer"
+            }
+            return item.displayName
+        }()
         self.isEnabled = item.isMovable
 
         configureCancellables()
@@ -129,19 +137,28 @@ final class LayoutBarItemView: NSView {
         NSColor.secondaryLabelColor.withAlphaComponent(0.9).setStroke()
         path.stroke()
 
-        if
-            let symbol = NSImage(systemSymbolName: "arrow.left.and.right", accessibilityDescription: "Spacer")?
-                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 9, weight: .medium))
-        {
-            let symbolSize = symbol.size
-            let symbolRect = NSRect(
-                x: bounds.midX - symbolSize.width / 2,
-                y: bounds.midY - symbolSize.height / 2,
-                width: symbolSize.width,
-                height: symbolSize.height
-            )
-            symbol.draw(in: symbolRect, from: .zero, operation: .sourceOver, fraction: 0.6)
-        }
+        let label: String = {
+            if
+                let id = item.tag.iceSpacerID,
+                let index = appState?.settings.general.menuBarSpacers.firstIndex(where: { $0.id == id })
+            {
+                return String(index + 1)
+            }
+            return "⇹"
+        }()
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+        let size = label.size(withAttributes: attributes)
+        let labelRect = NSRect(
+            x: bounds.midX - size.width / 2,
+            y: bounds.midY - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        label.draw(in: labelRect, withAttributes: attributes)
     }
 
     override func draw(_ dirtyRect: NSRect) {

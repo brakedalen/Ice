@@ -136,6 +136,9 @@ private struct MenuBarSpacersSection: View {
             ForEach($settings.menuBarSpacers) { $spacer in
                 HStack {
                     Image(systemName: "arrow.left.and.right.square")
+                    Text("Spacer \((settings.menuBarSpacers.firstIndex(where: { $0.id == spacer.id }) ?? 0) + 1)")
+                        .fontWeight(.medium)
+                        .frame(width: 70, alignment: .leading)
                     IcePicker("Width", selection: $spacer.width) {
                         ForEach([12, 16, 24, 32, 48, 64], id: \.self) { width in
                             Text("\(width) px").tag(width)
