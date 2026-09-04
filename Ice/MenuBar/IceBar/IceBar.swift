@@ -380,7 +380,8 @@ private struct IceBarContentView: View {
                             itemManager: itemManager,
                             menuBarManager: menuBarManager,
                             item: item,
-                            section: section
+                            section: section,
+                            displayID: screen.displayID
                         )
                     }
                 }
@@ -404,6 +405,7 @@ private struct IceBarItemView: View {
 
     let item: MenuBarItem
     let section: MenuBarSection.Name
+    let displayID: CGDirectDisplayID
 
     private var leftClickAction: () -> Void {
         return { [weak itemManager, weak menuBarManager] in
@@ -414,9 +416,13 @@ private struct IceBarItemView: View {
             Task {
                 try await Task.sleep(for: .milliseconds(25))
                 if Bridging.isWindowOnScreen(item.windowID) {
-                    try await itemManager.click(item: item, with: .left)
+                    try await itemManager.click(item: item, with: .left, on: displayID)
                 } else {
-                    await itemManager.temporarilyShow(item: item, clickingWith: .left)
+                    await itemManager.temporarilyShow(
+                        item: item,
+                        clickingWith: .left,
+                        on: displayID
+                    )
                 }
             }
         }
@@ -431,16 +437,20 @@ private struct IceBarItemView: View {
             Task {
                 try await Task.sleep(for: .milliseconds(25))
                 if Bridging.isWindowOnScreen(item.windowID) {
-                    try await itemManager.click(item: item, with: .right)
+                    try await itemManager.click(item: item, with: .right, on: displayID)
                 } else {
-                    await itemManager.temporarilyShow(item: item, clickingWith: .right)
+                    await itemManager.temporarilyShow(
+                        item: item,
+                        clickingWith: .right,
+                        on: displayID
+                    )
                 }
             }
         }
     }
 
     private var image: NSImage? {
-        guard let cachedImage = imageCache.images[item.tag] else {
+        guard let cachedImage = imageCache.images[item.windowID] else {
             return nil
         }
         return cachedImage.nsImage

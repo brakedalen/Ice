@@ -165,7 +165,10 @@ private final class MenuBarSearchHostingView: NSHostingView<AnyView> {
         panel: MenuBarSearchPanel
     ) {
         super.init(
-            rootView: MenuBarSearchContentView { [weak panel] in panel?.close() }
+            rootView: MenuBarSearchContentView(
+                displayID: displayID,
+                closePanel: { [weak panel] in panel?.close() }
+            )
                 .environmentObject(appState)
                 .environmentObject(appState.itemManager)
                 .environmentObject(appState.imageCache)
@@ -192,6 +195,7 @@ private struct MenuBarSearchContentView: View {
     @EnvironmentObject var model: MenuBarSearchModel
     @FocusState private var searchFieldIsFocused: Bool
 
+    let displayID: CGDirectDisplayID
     let closePanel: () -> Void
 
     private var hasItems: Bool {
@@ -223,7 +227,10 @@ private struct MenuBarSearchContentView: View {
         }
         .onChange(of: itemManager.itemCache, initial: true) {
             updateDisplayedItems()
-            if model.selection == nil {
+            if
+                model.selection == nil ||
+                !model.displayedItems.contains(where: { $0.id == model.selection })
+            {
                 selectFirstDisplayedItem()
             }
         }
@@ -321,7 +328,7 @@ private struct MenuBarSearchContentView: View {
                 items.append(SearchItem(headerItem, name.displayString))
 
                 for item in itemManager.itemCache.managedItems(for: name).reversed() {
-                    let listItem = ListItem.item(id: .item(item.tag)) {
+                    let listItem = ListItem.item(id: .item(item.windowID)) {
                         performAction(for: item)
                     } content: {
                         MenuBarSearchItemView(item: item)
@@ -366,8 +373,8 @@ private struct MenuBarSearchContentView: View {
 
     private func menuBarItem(for selection: MenuBarSearchModel.ItemID) -> MenuBarItem? {
         switch selection {
-        case .item(let tag):
-            return itemManager.itemCache.managedItems.first(matching: tag)
+        case .item(let windowID):
+            return itemManager.itemCache.managedItems.first { $0.windowID == windowID }
         case .header:
             return nil
         }
@@ -378,9 +385,13 @@ private struct MenuBarSearchContentView: View {
         Task {
             try await Task.sleep(for: .milliseconds(25))
             if Bridging.isWindowOnScreen(item.windowID) {
-                try await itemManager.click(item: item, with: .left)
+                try await itemManager.click(item: item, with: .left, on: displayID)
             } else {
-                await itemManager.temporarilyShow(item: item, clickingWith: .left)
+                await itemManager.temporarilyShow(
+                    item: item,
+                    clickingWith: .left,
+                    on: displayID
+                )
             }
         }
     }
@@ -393,7 +404,7 @@ private struct SettingsButton: View {
         Button(action: action) {
             Image(.iceCubeStroke)
                 .resizable()
-                .aspectRatio(contentMode: .fit)
+                .scaledToFit()
                 .foregroundStyle(.secondary)
                 .padding(2)
         }
@@ -420,7 +431,7 @@ private struct ShowItemButton: View {
 
                 Image(systemName: "return")
                     .resizable()
-                    .aspectRatio(contentMode: .fit)
+                    .scaledToFit()
                     .frame(width: 11, height: 11)
                     .foregroundStyle(.secondary)
                     .fontWeight(.bold)
@@ -486,7 +497,7 @@ private struct MenuBarSearchItemView: View {
 
     private var itemImage: NSImage {
         guard
-            let cached = imageCache.images[item.tag],
+            let cached = imageCache.images[item.windowID],
             let trimmed = cached.cgImage.trimmingTransparency(around: [.minXEdge, .maxXEdge])
         else {
             return NSImage()
@@ -549,7 +560,7 @@ private struct MenuBarSearchItemView: View {
         if let appIcon {
             Image(nsImage: appIcon)
                 .resizable()
-                .aspectRatio(contentMode: .fit)
+                .scaledToFit()
                 .frame(width: dimension, height: dimension)
         } else {
             RoundedRectangle(cornerRadius: 5)
@@ -558,7 +569,7 @@ private struct MenuBarSearchItemView: View {
                 .overlay {
                     Image(systemName: "rectangle.topthird.inset.filled")
                         .resizable()
-                        .aspectRatio(contentMode: .fit)
+                        .scaledToFit()
                         .foregroundStyle(.white)
                         .padding(3)
                         .shadow(radius: 2)

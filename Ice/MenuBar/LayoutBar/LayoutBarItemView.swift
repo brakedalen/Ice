@@ -96,7 +96,7 @@ final class LayoutBarItemView: NSView {
                     guard
                         let self,
                         !item.tag.isIceSpacer,
-                        let cachedImage = images[item.tag]
+                        let cachedImage = images[item.windowID]
                     else {
                         return
                     }
@@ -242,7 +242,13 @@ extension LayoutBarItemView: NSDraggingSource {
     }
 
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        let originalContainer = oldContainerInfo?.container
         defer {
+            // A cross-section drop is completed by the destination container,
+            // but the source container is the one that was frozen at drag
+            // start. Always release both, including cancelled drops.
+            originalContainer?.canSetArrangedViews = true
+            (superview as? LayoutBarContainer)?.canSetArrangedViews = true
             // always remove container info at the end of a session
             oldContainerInfo = nil
         }

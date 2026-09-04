@@ -63,14 +63,15 @@ final class LayoutBarPaddingView: NSView {
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        defer {
-            DispatchQueue.main.async {
-                self.container.canSetArrangedViews = true
-            }
-        }
-
         guard let draggingSource = sender.draggingSource as? LayoutBarItemView else {
             return false
+        }
+        let sourceContainer = draggingSource.oldContainerInfo?.container
+        defer {
+            DispatchQueue.main.async {
+                sourceContainer?.canSetArrangedViews = true
+                self.container.canSetArrangedViews = true
+            }
         }
 
         if let index = arrangedViews.firstIndex(of: draggingSource) {
@@ -111,8 +112,12 @@ final class LayoutBarPaddingView: NSView {
         Task {
             try await Task.sleep(for: .milliseconds(25))
             do {
-                try await appState.itemManager.move(item: item, to: destination)
-                appState.itemManager.removeTemporarilyShownItemFromCache(with: item.tag)
+                try await appState.itemManager.move(
+                    item: item,
+                    to: destination,
+                    origin: .layoutEditor
+                )
+                appState.itemManager.removeTemporarilyShownItemFromCache(withWindowID: item.windowID)
             } catch {
                 Logger.default.error("Error moving menu bar item: \(error, privacy: .public)")
                 let alert = NSAlert(error: error)

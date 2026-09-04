@@ -34,20 +34,18 @@ final class MenuBarItemImageCache: ObservableObject {
     /// The result of an image capture operation.
     private struct CaptureResult {
         /// The successfully captured images.
-        var images = [MenuBarItemTag: CapturedImage]()
+        var images = [CGWindowID: CapturedImage]()
 
         /// The menu bar items excluded from the capture.
         var excluded = [MenuBarItem]()
     }
 
-    /// The cached item images, keyed by their corresponding tags.
-    @Published private(set) var images = [MenuBarItemTag: CapturedImage]()
+    /// The cached item images, keyed by their live window identifiers.
+    /// Tags are not unique for multi-account apps such as OneDrive.
+    @Published private(set) var images = [CGWindowID: CapturedImage]()
 
     /// Logger for the menu bar item image cache.
     private let logger = Logger(category: "MenuBarItemImageCache")
-
-    /// Queue to run cache operations.
-    private let queue = DispatchQueue(label: "MenuBarItemImageCache", qos: .background)
 
     /// Image capture options.
     private let captureOption: CGWindowImageOption = [.boundsIgnoreFraming, .bestResolution]
@@ -74,8 +72,10 @@ final class MenuBarItemImageCache: ObservableObject {
 
         if let appState {
             Publishers.Merge3(
-                // Update every 3 seconds at minimum.
-                Timer.publish(every: 3, on: .main, in: .default).autoconnect().replace(with: ()),
+                // Event publishers perform the immediate refreshes. The timer
+                // is only a recovery poll for third-party items that fail to
+                // produce a useful WindowServer change notification.
+                Timer.publish(every: 10, on: .main, in: .default).autoconnect().replace(with: ()),
 
                 // Update when the active space or screen parameters change.
                 Publishers.Merge(
@@ -160,7 +160,7 @@ final class MenuBarItemImageCache: ObservableObject {
                 continue
             }
 
-            result.images[item.tag] = CapturedImage(cgImage: image, scale: scale)
+            result.images[item.windowID] = CapturedImage(cgImage: image, scale: scale)
         }
 
         return result
@@ -179,51 +179,94 @@ final class MenuBarItemImageCache: ObservableObject {
                 result.excluded.append(item)
                 continue
             }
-            result.images[item.tag] = CapturedImage(cgImage: image, scale: scale)
+            result.images[item.windowID] = CapturedImage(cgImage: image, scale: scale)
         }
 
         return result
     }
 
     /// Captures the images of the given menu bar items and returns the result.
-    private nonisolated func captureImages(of items: [MenuBarItem], scale: CGFloat, appState: AppState) async -> CaptureResult {
-        // Use individual capture after a move operation, since composite capture
-        // doesn't account for overlapping items.
-        if await appState.itemManager.lastMoveOperationOccurred(within: .seconds(2)) {
-            logger.debug("Capturing individually due to recent item movement")
-            return individualCapture(items, scale: scale)
-        }
-
-        let compositeResult = compositeCapture(items, scale: scale)
-
-        if compositeResult.excluded.isEmpty {
-            return compositeResult // All items captured successfully.
-        }
-
-        logger.notice(
-            """
-            Some items were excluded from composite capture. Attempting to capture \
-            excluded items individually: \(compositeResult.excluded, privacy: .public)
-            """
+    private nonisolated func captureImages(
+        of items: [MenuBarItem],
+        section: MenuBarSection.Name,
+        scale: CGFloat,
+        appState: AppState
+    ) async -> CaptureResult {
+        let captureID = UUID()
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let requestedOnScreenIDs = Set(items.filter(\.isOnScreen).map(\.windowID))
+        let modernResult = await ScreenCapture.captureOnScreenWindows(
+            with: requestedOnScreenIDs,
+            scale: scale
         )
 
-        var individualResult = individualCapture(compositeResult.excluded, scale: scale)
+        var result = CaptureResult()
+        for item in items {
+            guard
+                let image = modernResult.images[item.windowID],
+                !image.isTransparent()
+            else {
+                continue
+            }
+            result.images[item.windowID] = CapturedImage(cgImage: image, scale: scale)
+        }
 
-        // Merge the successfully captured images from each result. Keep excluded
-        // items as part of the result, so they can be logged elsewhere.
-        individualResult.images.merge(compositeResult.images) { (_, new) in new }
+        // ScreenCaptureKit cannot see off-screen menu bar windows. It can also
+        // briefly miss a window while an app recreates its status item. Limit
+        // deprecated capture to exactly those unmatched identifiers.
+        let fallbackItems = items.filter { result.images[$0.windowID] == nil }
+        let recentMove = await appState.itemManager.lastMoveOperationOccurred(within: .seconds(2))
+        var legacyResult = CaptureResult()
 
-        return individualResult
+        if recentMove {
+            logger.debug("Capturing legacy fallback individually due to recent item movement")
+            legacyResult = individualCapture(fallbackItems, scale: scale)
+        } else {
+            legacyResult = compositeCapture(fallbackItems, scale: scale)
+            if !legacyResult.excluded.isEmpty {
+                logger.notice(
+                    """
+                    Some items were excluded from legacy composite capture. Attempting \
+                    individual fallback: \(legacyResult.excluded, privacy: .public)
+                    """
+                )
+                var individualResult = individualCapture(legacyResult.excluded, scale: scale)
+                individualResult.images.merge(legacyResult.images) { (_, new) in new }
+                legacyResult = individualResult
+            }
+        }
+
+        result.images.merge(legacyResult.images) { (_, new) in new }
+        result.excluded = legacyResult.excluded
+
+        let elapsedMilliseconds = Int(
+            (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000
+        )
+        let modernError = modernResult.errorDescription?
+            .replacingOccurrences(of: " ", with: "_") ?? "none"
+        AutomationDiagnosticLogger.shared.write(
+            "CAPTURE_BATCH id=\(captureID.uuidString) section=\(section.logString) " +
+            "requested=\(items.count) modern=\(result.images.count - legacyResult.images.count) " +
+            "legacy=\(legacyResult.images.count) failed=\(result.excluded.count) " +
+            "modernUnavailable=\(modernResult.unavailableWindowIDs.count) " +
+            "recentMove=\(recentMove) durationMs=\(elapsedMilliseconds) modernError=\(modernError)"
+        )
+        return result
     }
 
     /// Captures the images of the menu bar items in the given section and returns
-    /// a dictionary containing the images, keyed by their menu bar item tags.
-    private func captureImages(for section: MenuBarSection.Name, scale: CGFloat, appState: AppState) async -> [MenuBarItemTag: CapturedImage] {
+    /// a dictionary containing the images, keyed by their window identifiers.
+    private func captureImages(for section: MenuBarSection.Name, scale: CGFloat, appState: AppState) async -> [CGWindowID: CapturedImage] {
         // Ice's own spacers are empty and can never be captured. The layout
         // bar draws its own representation for them, so don't waste capture
         // attempts (and log spam) on them.
         let items = await appState.itemManager.itemCache.managedItems(for: section).filter { !$0.tag.isIceSpacer }
-        let captureResult = await captureImages(of: items, scale: scale, appState: appState)
+        let captureResult = await captureImages(
+            of: items,
+            section: section,
+            scale: scale,
+            appState: appState
+        )
         if !captureResult.excluded.isEmpty {
             logger.error("Some items failed capture: \(captureResult.excluded, privacy: .public)")
         }
@@ -250,7 +293,7 @@ final class MenuBarItemImageCache: ObservableObject {
         }
 
         let scale = screen.backingScaleFactor
-        var newImages = [MenuBarItemTag: CapturedImage]()
+        var newImages = [CGWindowID: CapturedImage]()
 
         for section in sections {
             guard await !appState.itemManager.itemCache[section].isEmpty else {
@@ -267,12 +310,12 @@ final class MenuBarItemImageCache: ObservableObject {
             newImages.merge(sectionImages) { (_, new) in new }
         }
 
-        // Get the set of valid item tags from all sections to clean up stale entries
-        let allValidTags = await Set(appState.itemManager.itemCache.managedItems.map(\.tag))
+        // Get the set of valid windows from all sections to clean up stale entries.
+        let allValidWindowIDs = await Set(appState.itemManager.itemCache.managedItems.map(\.windowID))
 
-        await MainActor.run { [newImages, allValidTags] in
+        await MainActor.run { [newImages, allValidWindowIDs] in
             // Remove images for items that no longer exist in the item cache
-            images = images.filter { allValidTags.contains($0.key) }
+            images = images.filter { allValidWindowIDs.contains($0.key) }
             // Merge in the new images
             images.merge(newImages) { (_, new) in new }
         }
@@ -343,7 +386,7 @@ final class MenuBarItemImageCache: ObservableObject {
             return false
         }
         let keys = Set(images.keys)
-        for item in items where keys.contains(item.tag) {
+        for item in items where keys.contains(item.windowID) {
             return false
         }
         return true

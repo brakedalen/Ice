@@ -8,6 +8,14 @@ import ScreenCaptureKit
 
 /// A namespace for screen capture operations.
 enum ScreenCapture {
+    /// Result of capturing independent, on-screen windows through
+    /// ScreenCaptureKit. Missing windows are intentionally returned to the
+    /// caller so it can use the legacy API for off-screen status items.
+    struct ModernWindowCaptureResult {
+        var images = [CGWindowID: CGImage]()
+        var unavailableWindowIDs = Set<CGWindowID>()
+        var errorDescription: String?
+    }
 
     // MARK: Permissions
 
@@ -78,7 +86,7 @@ enum ScreenCapture {
         let bounds = screenBounds ?? .null
         // ScreenCaptureKit doesn't support capturing images of offscreen menu bar
         // items, so we unfortunately have to use the deprecated CGWindowList API.
-        return CGImage(windowListFromArrayScreenBounds: bounds, windowArray: array, imageOption: option)
+        return CGImage.windowListImage(from: bounds, windowArray: array, imageOption: option)
     }
 
     /// Captures an image of a window.
@@ -91,4 +99,93 @@ enum ScreenCapture {
     static func captureWindow(with windowID: CGWindowID, screenBounds: CGRect? = nil, option: CGWindowImageOption = []) -> CGImage? {
         captureWindows(with: [windowID], screenBounds: screenBounds, option: option)
     }
+
+    /// Captures independent on-screen windows with ScreenCaptureKit.
+    ///
+    /// ScreenCaptureKit deliberately omits off-screen menu bar windows. Those
+    /// identifiers are reported as unavailable instead of treated as errors,
+    /// allowing callers to limit deprecated CGWindowList capture to the cases
+    /// where no modern equivalent exists.
+    static func captureOnScreenWindows(
+        with windowIDs: Set<CGWindowID>,
+        scale: CGFloat
+    ) async -> ModernWindowCaptureResult {
+        guard !windowIDs.isEmpty else {
+            return ModernWindowCaptureResult()
+        }
+
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false,
+                onScreenWindowsOnly: true
+            )
+            let windowsByID = Dictionary(
+                uniqueKeysWithValues: content.windows
+                    .filter { windowIDs.contains($0.windowID) }
+                    .map { ($0.windowID, $0) }
+            )
+
+            var result = ModernWindowCaptureResult()
+            result.unavailableWindowIDs = windowIDs.subtracting(windowsByID.keys)
+
+            for windowID in windowIDs.sorted() {
+                guard let window = windowsByID[windowID] else {
+                    continue
+                }
+                let configuration = SCStreamConfiguration()
+                configuration.width = max(Int(window.frame.width * scale), 1)
+                configuration.height = max(Int(window.frame.height * scale), 1)
+                configuration.scalesToFit = true
+                configuration.showsCursor = false
+                configuration.ignoreShadowsSingleWindow = true
+                configuration.ignoreGlobalClipSingleWindow = true
+
+                do {
+                    let filter = SCContentFilter(desktopIndependentWindow: window)
+                    let image = try await SCScreenshotManager.captureImage(
+                        contentFilter: filter,
+                        configuration: configuration
+                    )
+                    result.images[windowID] = image
+                } catch {
+                    result.unavailableWindowIDs.insert(windowID)
+                    result.errorDescription = String(describing: error)
+                }
+            }
+            return result
+        } catch {
+            return ModernWindowCaptureResult(
+                unavailableWindowIDs: windowIDs,
+                errorDescription: String(describing: error)
+            )
+        }
+    }
 }
+
+/// A protocol used to isolate the deprecated `CGWindowList` screen capture API.
+///
+/// ScreenCaptureKit doesn't support capturing composite images of offscreen
+/// menu bar items, but this should be replaced once it does.
+private protocol WindowListImage {
+    init?(
+        windowListFromArrayScreenBounds: CGRect,
+        windowArray: CFArray,
+        imageOption: CGWindowImageOption
+    )
+}
+
+private extension WindowListImage {
+    static func windowListImage(
+        from screenBounds: CGRect,
+        windowArray: CFArray,
+        imageOption: CGWindowImageOption
+    ) -> Self? {
+        Self(
+            windowListFromArrayScreenBounds: screenBounds,
+            windowArray: windowArray,
+            imageOption: imageOption
+        )
+    }
+}
+
+extension CGImage: WindowListImage { }

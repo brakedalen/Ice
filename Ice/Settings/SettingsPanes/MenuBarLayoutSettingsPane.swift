@@ -122,7 +122,6 @@ struct MenuBarLayoutSettingsPane: View {
     }
 }
 
-
 // MARK: - MenuBarSpacersSection
 
 private struct MenuBarSpacersSection: View {

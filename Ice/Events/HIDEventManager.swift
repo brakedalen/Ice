@@ -24,6 +24,25 @@ final class HIDEventManager: ObservableObject {
     /// History of the manager's enabled states.
     private var enabledStateStack = [Bool]()
 
+    /// Whether the high-frequency mouse-moved event tap is currently active.
+    /// Keeping it off unless show-on-hover is enabled avoids waking Ice for
+    /// every pointer movement when the feature is unused.
+    private var isMouseMovedTapStarted = false
+
+    /// Last time a mouse-moved event was evaluated. Thirty evaluations per
+    /// second is more than enough for hover UI while bounding WindowServer
+    /// work on high-polling-rate mice.
+    private var lastMouseMovedEvaluationUptime: TimeInterval = 0
+
+    /// Short-lived menu item bounds cache shared by hover hit tests.
+    private var menuBarItemBoundsCache = [CGRect]()
+    private var menuBarItemBoundsCacheExpiry: TimeInterval = 0
+    private var menuBarItemBoundsCacheHits = 0
+    private var menuBarItemBoundsCacheRefreshes = 0
+    private var lastMousePerformanceLogUptime: TimeInterval = 0
+
+    private let diagnosticLogger = AutomationDiagnosticLogger.shared
+
     /// A Boolean value that indicates whether the manager is enabled.
     private var isEnabled = false {
         didSet {
@@ -36,6 +55,7 @@ final class HIDEventManager: ObservableObject {
                     monitor.stop()
                 }
             }
+            updateMouseMovedTap(reason: "manager-state")
         }
     }
 
@@ -89,9 +109,21 @@ final class HIDEventManager: ObservableObject {
         placement: .tailAppendEventTap,
         option: .listenOnly
     ) { [weak self] _, event in
-        if let self, isEnabled, let appState, let screen = bestScreen(appState: appState) {
-            handleShowOnHover(appState: appState, screen: screen)
+        guard
+            let self,
+            isEnabled,
+            let appState,
+            appState.settings.general.showOnHover,
+            let screen = bestScreen(appState: appState)
+        else {
+            return event
         }
+        let uptime = ProcessInfo.processInfo.systemUptime
+        guard uptime - lastMouseMovedEvaluationUptime >= 1.0 / 30.0 else {
+            return event
+        }
+        lastMouseMovedEvaluationUptime = uptime
+        handleShowOnHover(appState: appState, screen: screen)
         return event
     }
 
@@ -112,7 +144,6 @@ final class HIDEventManager: ObservableObject {
         mouseDownMonitor,
         mouseUpMonitor,
         mouseDraggedMonitor,
-        mouseMovedTap,
         scrollWheelMonitor,
     ]
 
@@ -148,6 +179,14 @@ final class HIDEventManager: ObservableObject {
                 }
             }
             .store(in: &c)
+
+            appState.settings.general.$showOnHover
+                .removeDuplicates()
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    self?.updateMouseMovedTap(reason: "show-on-hover-setting")
+                }
+                .store(in: &c)
         }
 
         cancellables = c
@@ -164,6 +203,27 @@ final class HIDEventManager: ObservableObject {
     func stopAll() {
         enabledStateStack.append(isEnabled)
         isEnabled = false
+    }
+
+    /// Starts the high-frequency event tap only while its feature is active.
+    private func updateMouseMovedTap(reason: String) {
+        let shouldStart = isEnabled && (appState?.settings.general.showOnHover ?? false)
+        guard shouldStart != isMouseMovedTapStarted else {
+            return
+        }
+        if shouldStart {
+            mouseMovedTap.start()
+            isMouseMovedTapStarted = true
+        } else {
+            mouseMovedTap.stop()
+            isMouseMovedTapStarted = false
+            menuBarItemBoundsCache.removeAll(keepingCapacity: true)
+            menuBarItemBoundsCacheExpiry = 0
+        }
+        let state = shouldStart ? "started" : "stopped"
+        diagnosticLogger.write(
+            "PERF_MOUSE_TAP state=\(state) reason=\(reason)"
+        )
     }
 }
 
@@ -495,13 +555,7 @@ extension HIDEventManager {
         guard let mouseLocation = MouseHelpers.locationCoreGraphics else {
             return false
         }
-        let windowIDs = Bridging.getMenuBarWindowList(option: [.onScreen, .activeSpace, .itemsOnly])
-        return windowIDs.contains { windowID in
-            guard let bounds = Bridging.getWindowBounds(for: windowID) else {
-                return false
-            }
-            return bounds.contains(mouseLocation)
-        }
+        return cachedMenuBarItemBounds().contains { $0.contains(mouseLocation) }
     }
 
     /// A Boolean value that indicates whether the mouse pointer is within
@@ -541,9 +595,9 @@ extension HIDEventManager {
     /// the bounds of an empty space in the menu bar.
     func isMouseInsideEmptyMenuBarSpace(appState: AppState, screen: NSScreen) -> Bool {
         isMouseInsideMenuBar(appState: appState, screen: screen) &&
+        !isMouseInsideNotch(appState: appState, screen: screen) &&
         !isMouseInsideApplicationMenu(appState: appState, screen: screen) &&
-        !isMouseInsideMenuBarItem(appState: appState, screen: screen) &&
-        !isMouseInsideNotch(appState: appState, screen: screen)
+        !isMouseInsideMenuBarItem(appState: appState, screen: screen)
     }
 
     /// A Boolean value that indicates whether the mouse pointer is within
@@ -570,6 +624,38 @@ extension HIDEventManager {
             return false
         }
         return iceIconFrame.contains(mouseLocation)
+    }
+
+    /// Returns menu item bounds cached for a quarter of a second. The menu
+    /// bar cannot meaningfully change at pointer-event frequency, while the
+    /// underlying private WindowServer queries are comparatively expensive.
+    private func cachedMenuBarItemBounds() -> [CGRect] {
+        let uptime = ProcessInfo.processInfo.systemUptime
+        if uptime < menuBarItemBoundsCacheExpiry {
+            menuBarItemBoundsCacheHits += 1
+            logMousePerformanceIfNeeded(uptime: uptime)
+            return menuBarItemBoundsCache
+        }
+
+        let windowIDs = Bridging.getMenuBarWindowList(option: [.onScreen, .activeSpace, .itemsOnly])
+        menuBarItemBoundsCache = windowIDs.compactMap { Bridging.getWindowBounds(for: $0) }
+        menuBarItemBoundsCacheExpiry = uptime + 0.25
+        menuBarItemBoundsCacheRefreshes += 1
+        logMousePerformanceIfNeeded(uptime: uptime)
+        return menuBarItemBoundsCache
+    }
+
+    private func logMousePerformanceIfNeeded(uptime: TimeInterval) {
+        guard uptime - lastMousePerformanceLogUptime >= 60 else {
+            return
+        }
+        diagnosticLogger.write(
+            "PERF_MOUSE_CACHE hits=\(menuBarItemBoundsCacheHits) " +
+            "refreshes=\(menuBarItemBoundsCacheRefreshes)"
+        )
+        menuBarItemBoundsCacheHits = 0
+        menuBarItemBoundsCacheRefreshes = 0
+        lastMousePerformanceLogUptime = uptime
     }
 }
 

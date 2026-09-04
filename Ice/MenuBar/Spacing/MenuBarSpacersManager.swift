@@ -52,6 +52,8 @@ final class MenuBarSpacersManager {
 
     private let logger = Logger(category: "MenuBarSpacersManager")
 
+    private let diagnosticLogger = AutomationDiagnosticLogger.shared
+
     /// Performs the initial setup of the manager.
     func performSetup(with appState: AppState) {
         self.appState = appState
@@ -74,8 +76,12 @@ final class MenuBarSpacersManager {
     private func reconcile(spacers: [GeneralSettings.MenuBarSpacer], showMarkers: Bool) {
         // Remove status items for deleted spacers.
         let validIDs = Set(spacers.map { $0.id })
-        for (id, statusItem) in statusItems where !validIDs.contains(id) {
+        for id in statusItems.keys.filter({ !validIDs.contains($0) }) {
+            guard let statusItem = statusItems[id] else {
+                continue
+            }
             logger.info("Removing spacer \(id.uuidString, privacy: .public)")
+            diagnosticLogger.write("SPACER_REMOVE id=\(id.uuidString) reason=settings")
             NSStatusBar.system.removeStatusItem(statusItem)
             statusItems.removeValue(forKey: id)
         }
@@ -90,6 +96,9 @@ final class MenuBarSpacersManager {
 
     private func createStatusItem(for spacer: GeneralSettings.MenuBarSpacer) -> NSStatusItem {
         logger.info("Creating spacer \(spacer.id.uuidString, privacy: .public) with width \(spacer.width, privacy: .public)")
+        diagnosticLogger.write(
+            "SPACER_CREATE id=\(spacer.id.uuidString) width=\(spacer.width)"
+        )
 
         let autosaveName = Self.autosaveNamePrefix + spacer.id.uuidString
 
@@ -113,71 +122,6 @@ final class MenuBarSpacersManager {
         statusItem.autosaveName = autosaveName
         statusItems[spacer.id] = statusItem
         return statusItem
-    }
-
-    /// An error thrown when a spacer cannot be repositioned.
-    struct RepositionError: Error, CustomStringConvertible {
-        let description: String
-    }
-
-    /// Moves a spacer to the given destination by seeding its preferred
-    /// position and recreating its status item.
-    ///
-    /// Ice's normal move machinery synthesizes mouse events targeted at
-    /// the item's owning process — which for spacers is Ice itself. That
-    /// deadlocks against the very operation awaiting it, times out, and
-    /// sprays stray events into the menu bar. Since Ice owns the spacer,
-    /// no events are needed at all: write the position macOS should use
-    /// and recreate the item, the same mechanism used at every launch.
-    func repositionSpacer(item: MenuBarItem, to destination: MenuBarItemManager.MoveDestination) throws {
-        guard
-            let id = item.tag.iceSpacerID,
-            let statusItem = statusItems[id],
-            let spacers = appState?.settings.general.menuBarSpacers,
-            let index = spacers.firstIndex(where: { $0.id == id })
-        else {
-            throw RepositionError(description: "No managed spacer for tag \(item.tag)")
-        }
-        let spacer = spacers[index]
-
-        let target = destination.targetItem
-
-        // Preferred positions are measured from the right edge of the
-        // screen to the item's left edge. Choosing a value 1 point inside
-        // the target's own edge sorts the spacer directly next to it.
-        guard let screen = NSScreen.screens.first(where: { screen in
-            screen.frame.minX <= target.bounds.midX && target.bounds.midX <= screen.frame.maxX
-        }) ?? NSScreen.main else {
-            throw RepositionError(description: "No screen for target item \(target.tag)")
-        }
-
-        let position: CGFloat = switch destination {
-        case .leftOfItem:
-            screen.frame.maxX - target.bounds.minX + 1
-        case .rightOfItem:
-            screen.frame.maxX - target.bounds.maxX + 1
-        }
-
-        logger.info(
-            """
-            Repositioning spacer \(id.uuidString, privacy: .public) to preferred \
-            position \(position, format: .fixed(precision: 1), privacy: .public)
-            """
-        )
-
-        let autosaveName = Self.autosaveNamePrefix + id.uuidString
-        let showMarkers = appState?.settings.general.showSpacerMarkers ?? true
-
-        // Removing a status item clears its stored position, so write the
-        // new position after removal, then recreate the item.
-        NSStatusBar.system.removeStatusItem(statusItem)
-        statusItems.removeValue(forKey: id)
-        ControlItemDefaults[.preferredPosition, autosaveName] = position
-
-        let newStatusItem = NSStatusBar.system.statusItem(withLength: CGFloat(spacer.width))
-        newStatusItem.autosaveName = autosaveName
-        statusItems[id] = newStatusItem
-        configureButton(of: newStatusItem, number: index + 1, showMarkers: showMarkers)
     }
 
     private func configureButton(of statusItem: NSStatusItem, number: Int, showMarkers: Bool) {

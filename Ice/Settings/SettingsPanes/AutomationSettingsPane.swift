@@ -3,6 +3,7 @@
 //  Ice
 //
 
+import AppKit
 import SwiftUI
 
 struct AutomationSettingsPane: View {
@@ -14,6 +15,7 @@ struct AutomationSettingsPane: View {
         IceForm {
             IceSection("Item Positions") {
                 rememberItemPositions
+                automationLog
             }
             IceSection("Wi-Fi Rule") {
                 AutomationRuleView(
@@ -62,6 +64,17 @@ struct AutomationSettingsPane: View {
             for example after a restart — Ice moves it back to where it belongs.
             """
         )
+    }
+
+    private var automationLog: some View {
+        LabeledContent("Diagnostics") {
+            Button("Show Log in Finder…") {
+                let logger = AutomationDiagnosticLogger.shared
+                logger.write("LOG_REVEALED source=automation-settings")
+                NSWorkspace.shared.activateFileViewerSelecting([logger.logURL])
+            }
+        }
+        .annotation("Ice records automation details in ~/Library/Logs/Ice/automation.log.")
     }
 }
 
@@ -176,10 +189,10 @@ private struct AutomationSelectedItemsSummary: View {
                     ZStack {
                         RoundedRectangle(cornerRadius: 5)
                             .fill(Color.black.opacity(0.72))
-                        if let captured = imageCache.images[item.tag] {
+                        if let captured = imageCache.images[item.windowID] {
                             Image(nsImage: captured.nsImage)
                                 .resizable()
-                                .aspectRatio(contentMode: .fit)
+                                .scaledToFit()
                                 .frame(height: 17)
                                 .padding(.horizontal, 3)
                         }
@@ -227,6 +240,11 @@ private struct AutomationItemPickerContent: View {
         }
     }
 
+    private var unavailableSelectedKeys: [String] {
+        let eligibleKeys = Set(eligibleItems.map(\.key))
+        return selection.subtracting(eligibleKeys).sorted()
+    }
+
     var body: some View {
         if eligibleItems.isEmpty {
             Text("No menu bar items found. Open the Menu Bar Layout pane to refresh the item list.")
@@ -244,6 +262,19 @@ private struct AutomationItemPickerContent: View {
                         }
                     }
                 }
+
+                if !unavailableSelectedKeys.isEmpty {
+                    Divider()
+                        .padding(.vertical, 4)
+                    Text("Unavailable items")
+                        .foregroundStyle(.secondary)
+                    ForEach(unavailableSelectedKeys, id: \.self) { key in
+                        Toggle(isOn: bindingForItem(withKey: key)) {
+                            Text(displayName(forUnavailableKey: key))
+                                .help(key.replacingOccurrences(of: "\u{1F}", with: " | "))
+                        }
+                    }
+                }
             }
         }
     }
@@ -256,10 +287,10 @@ private struct AutomationItemPickerContent: View {
         ZStack {
             RoundedRectangle(cornerRadius: 5)
                 .fill(Color.black.opacity(0.72))
-            if let captured = imageCache.images[item.tag] {
+            if let captured = imageCache.images[item.windowID] {
                 Image(nsImage: captured.nsImage)
                     .resizable()
-                    .aspectRatio(contentMode: .fit)
+                    .scaledToFit()
                     .frame(height: 17)
                     .padding(.horizontal, 3)
             } else {
@@ -281,5 +312,16 @@ private struct AutomationItemPickerContent: View {
                 }
             }
         )
+    }
+
+    private func displayName(forUnavailableKey key: String) -> String {
+        let components = key.split(separator: "\u{1F}", maxSplits: 1).map(String.init)
+        guard let namespace = components.first else {
+            return key
+        }
+        if components.count == 2, components[1] != "Item-0", !components[1].isEmpty {
+            return "\(namespace) — \(components[1])"
+        }
+        return namespace
     }
 }

@@ -40,6 +40,22 @@ final class MenuBarManager: ObservableObject {
     /// A Boolean value that indicates whether the application menus are hidden.
     private var isHidingApplicationMenus = false
 
+    /// Monotonically increasing token used to discard WindowServer results
+    /// that arrive after the section or settings state has changed.
+    private var applicationMenuEvaluationGeneration = 0
+
+    /// State needed to restore focus after Ice temporarily becomes a regular
+    /// app to make room for status items.
+    private struct ApplicationMenuHideContext {
+        let id: UUID
+        let previousApplication: NSRunningApplication?
+        let startedAt: TimeInterval
+        var didObserveIceFrontmost = false
+    }
+
+    private var applicationMenuHideContext: ApplicationMenuHideContext?
+    private let diagnosticLogger = AutomationDiagnosticLogger.shared
+
     /// The panel that contains the Ice Bar interface.
     let iceBarPanel = IceBarPanel()
 
@@ -113,7 +129,7 @@ final class MenuBarManager: ObservableObject {
         // Handle the `focusedApp` rehide strategy.
         NSWorkspace.shared.publisher(for: \.frontmostApplication)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
+            .sink { [weak self] frontmostApplication in
                 if
                     let self,
                     let appState,
@@ -125,6 +141,24 @@ final class MenuBarManager: ObservableObject {
                     Task {
                         try await Task.sleep(for: .seconds(0.1))
                         hiddenSection.hide()
+                    }
+                }
+
+                // If the user deliberately switches applications while Ice
+                // is making room, release the temporary activation policy
+                // without pulling the old app back to the front.
+                if let self, var context = applicationMenuHideContext {
+                    if
+                        frontmostApplication?.processIdentifier ==
+                            NSRunningApplication.current.processIdentifier
+                    {
+                        context.didObserveIceFrontmost = true
+                        applicationMenuHideContext = context
+                    } else if context.didObserveIceFrontmost {
+                        finishHidingApplicationMenus(
+                            reason: "frontmost-application-changed",
+                            restorePreviousApplication: false
+                        )
                     }
                 }
             }
@@ -150,70 +184,61 @@ final class MenuBarManager: ObservableObject {
         Publishers.MergeMany(sections.map { $0.controlItem.$state })
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                guard let self, let appState else {
-                    return
-                }
+                self?.evaluateApplicationMenuVisibility(reason: "section-state")
+            }
+            .store(in: &c)
 
-                // Don't continue if:
-                //   * The "HideApplicationMenus" setting isn't enabled.
-                //   * Using the Ice Bar.
-                //   * The menu bar is hidden by the system.
-                //   * The active space is fullscreen.
-                //   * The settings window is visible.
-                guard
-                    appState.settings.advanced.hideApplicationMenus,
-                    !appState.settings.general.useIceBar,
-                    !isMenuBarHiddenBySystem,
-                    !appState.activeSpace.isFullscreen,
-                    !appState.navigationState.isSettingsPresented
-                else {
-                    return
-                }
+        // Settings, fullscreen and system menu-bar changes must actively undo
+        // a previous hide. The old implementation only reacted to section
+        // state, which could leave Ice frontmost indefinitely.
+        appState?.settings.advanced.$hideApplicationMenus
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.evaluateApplicationMenuVisibility(reason: "setting")
+            }
+            .store(in: &c)
 
-                if sections.contains(where: { $0.controlItem.state == .showSection }) {
-                    guard let screen = NSScreen.main else {
-                        return
-                    }
+        appState?.settings.general.$useIceBar
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.evaluateApplicationMenuVisibility(reason: "ice-bar-setting")
+            }
+            .store(in: &c)
 
-                    // Get the application menu frame for the display.
-                    guard let applicationMenuFrame = screen.getApplicationMenuFrame() else {
-                        return
-                    }
+        appState?.$activeSpace
+            .map(\.isFullscreen)
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.evaluateApplicationMenuVisibility(reason: "space")
+            }
+            .store(in: &c)
 
-                    Task {
-                        // Get all items.
-                        var items = await MenuBarItem.getMenuBarItems(on: screen.displayID, option: .activeSpace)
+        appState?.navigationState.$isSettingsPresented
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.evaluateApplicationMenuVisibility(reason: "settings-window")
+            }
+            .store(in: &c)
 
-                        // Filter the items down according to the currently enabled/shown sections.
-                        if
-                            let alwaysHiddenSection = self.section(withName: .alwaysHidden),
-                            alwaysHiddenSection.isEnabled
-                        {
-                            if alwaysHiddenSection.controlItem.state == .hideSection {
-                                if let alwaysHiddenControlItem = items.firstIndex(matching: .alwaysHiddenControlItem).map({ items.remove(at: $0) }) {
-                                    items.trimPrefix { $0.bounds.maxX <= alwaysHiddenControlItem.bounds.minX }
-                                }
-                            }
-                        } else {
-                            if let hiddenControlItem = items.firstIndex(matching: .hiddenControlItem).map({ items.remove(at: $0) }) {
-                                items.trimPrefix { $0.bounds.maxX <= hiddenControlItem.bounds.minX }
-                            }
-                        }
+        $isMenuBarHiddenBySystem
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.evaluateApplicationMenuVisibility(reason: "system-menu-bar")
+            }
+            .store(in: &c)
 
-                        // Get the leftmost item on the screen.
-                        guard let leftmostItem = items.min(by: { $0.bounds.minX < $1.bounds.minX }) else {
-                            return
-                        }
-
-                        // If the minX of the item is less than or equal to the maxX of the
-                        // application menu frame, activate the app to hide the menu.
-                        if leftmostItem.bounds.minX <= applicationMenuFrame.maxX {
-                            self.hideApplicationMenus()
-                        }
-                    }
-                } else if isHidingApplicationMenus {
-                    showApplicationMenus()
-                }
+        // Last-resort recovery for interrupted animations, missed state
+        // publications and third-party status items that never close cleanly.
+        Timer.publish(every: 2, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                self?.applicationMenuWatchdogTick()
             }
             .store(in: &c)
 
@@ -295,26 +320,187 @@ final class MenuBarManager: ObservableObject {
         menu.popUp(positioning: nil, at: point, in: nil)
     }
 
-    /// Hides the application menus.
-    func hideApplicationMenus() {
+    /// Evaluates whether the active application's menus overlap the status
+    /// items that Ice is currently exposing.
+    private func evaluateApplicationMenuVisibility(reason: String) {
+        applicationMenuEvaluationGeneration += 1
+        let generation = applicationMenuEvaluationGeneration
+
+        guard applicationMenusMayBeHidden else {
+            finishHidingApplicationMenus(reason: "ineligible-\(reason)")
+            return
+        }
+        guard sections.contains(where: { $0.controlItem.state == .showSection }) else {
+            finishHidingApplicationMenus(reason: "sections-hidden")
+            return
+        }
+        guard !isHidingApplicationMenus else {
+            return
+        }
+        guard
+            let screen = sections.first(where: { $0.controlItem.state == .showSection })?
+                .controlItem.window?.screen ?? NSScreen.main,
+            let applicationMenuFrame = screen.getApplicationMenuFrame()
+        else {
+            diagnosticLogger.write(
+                "APP_MENUS_EVALUATE id=\(generation) result=missing-screen-or-frame reason=\(reason)",
+                level: .warning
+            )
+            return
+        }
+
+        diagnosticLogger.write(
+            "APP_MENUS_EVALUATE id=\(generation) state=start reason=\(reason) " +
+            "display=\(screen.displayID) appMenuMaxX=\(applicationMenuFrame.maxX)"
+        )
+
+        Task {
+            var items = await MenuBarItem.getMenuBarItems(
+                on: screen.displayID,
+                option: .activeSpace
+            )
+            guard
+                generation == applicationMenuEvaluationGeneration,
+                applicationMenusMayBeHidden,
+                sections.contains(where: { $0.controlItem.state == .showSection })
+            else {
+                diagnosticLogger.write(
+                    "APP_MENUS_EVALUATE id=\(generation) result=discarded-stale"
+                )
+                return
+            }
+
+            // Filter items down according to enabled and shown sections.
+            if
+                let alwaysHiddenSection = section(withName: .alwaysHidden),
+                alwaysHiddenSection.isEnabled
+            {
+                if alwaysHiddenSection.controlItem.state == .hideSection,
+                   let index = items.firstIndex(matching: .alwaysHiddenControlItem)
+                {
+                    let controlItem = items.remove(at: index)
+                    items.trimPrefix { $0.bounds.maxX <= controlItem.bounds.minX }
+                }
+            } else if let index = items.firstIndex(matching: .hiddenControlItem) {
+                let controlItem = items.remove(at: index)
+                items.trimPrefix { $0.bounds.maxX <= controlItem.bounds.minX }
+            }
+
+            guard let leftmostItem = items.min(by: { $0.bounds.minX < $1.bounds.minX }) else {
+                diagnosticLogger.write(
+                    "APP_MENUS_EVALUATE id=\(generation) result=no-items",
+                    level: .warning
+                )
+                return
+            }
+
+            let overlaps = leftmostItem.bounds.minX <= applicationMenuFrame.maxX
+            diagnosticLogger.write(
+                "APP_MENUS_EVALUATE id=\(generation) result=complete " +
+                "leftmostMinX=\(leftmostItem.bounds.minX) overlaps=\(overlaps)"
+            )
+            if overlaps {
+                hideApplicationMenus(reason: reason, evaluationID: generation)
+            }
+        }
+    }
+
+    private var applicationMenusMayBeHidden: Bool {
+        guard let appState else {
+            return false
+        }
+        return appState.settings.advanced.hideApplicationMenus &&
+        (!appState.settings.general.useIceBar || appState.itemManager.isOneDriveNativeRevealActive) &&
+        !isMenuBarHiddenBySystem &&
+        !appState.activeSpace.isFullscreen &&
+        !appState.navigationState.isSettingsPresented
+    }
+
+    /// Hides the application menus as a recoverable transaction.
+    private func hideApplicationMenus(reason: String, evaluationID: Int) {
+        guard !isHidingApplicationMenus else {
+            return
+        }
         guard let appState else {
             logger.error("Error hiding application menus: Missing app state")
             return
         }
-        logger.info("Hiding application menus")
-        appState.activate(withPolicy: .regular)
+        let currentPID = NSRunningApplication.current.processIdentifier
+        let previousApplication = NSWorkspace.shared.frontmostApplication
+            .flatMap { $0.processIdentifier == currentPID ? nil : $0 }
+        let context = ApplicationMenuHideContext(
+            id: UUID(),
+            previousApplication: previousApplication,
+            startedAt: ProcessInfo.processInfo.systemUptime
+        )
+        applicationMenuHideContext = context
         isHidingApplicationMenus = true
+        diagnosticLogger.write(
+            "APP_MENUS_HIDE id=\(context.id.uuidString) state=start evaluation=\(evaluationID) " +
+            "reason=\(reason) previousPID=\(previousApplication?.processIdentifier ?? 0)"
+        )
+        appState.activate(withPolicy: .regular)
     }
 
     /// Shows the application menus.
     func showApplicationMenus() {
+        finishHidingApplicationMenus(reason: "explicit-show")
+    }
+
+    private func finishHidingApplicationMenus(
+        reason: String,
+        restorePreviousApplication: Bool = true
+    ) {
+        guard isHidingApplicationMenus || applicationMenuHideContext != nil else {
+            return
+        }
         guard let appState else {
             logger.error("Error showing application menus: Missing app state")
             return
         }
-        logger.info("Showing application menus")
-        appState.deactivate(withPolicy: .accessory)
+        let context = applicationMenuHideContext
+        applicationMenuHideContext = nil
         isHidingApplicationMenus = false
+        appState.deactivate(withPolicy: .accessory)
+
+        if
+            restorePreviousApplication,
+            let previousApplication = context?.previousApplication,
+            !previousApplication.isTerminated
+        {
+            previousApplication.activate()
+        }
+
+        let elapsed = context.map {
+            ProcessInfo.processInfo.systemUptime - $0.startedAt
+        } ?? 0
+        let contextID = context?.id.uuidString ?? "unknown"
+        diagnosticLogger.write(
+            "APP_MENUS_HIDE id=\(contextID) state=end " +
+            "reason=\(reason) restorePrevious=\(restorePreviousApplication) " +
+            "durationMs=\(Int(elapsed * 1_000))"
+        )
+    }
+
+    private func applicationMenuWatchdogTick() {
+        guard let context = applicationMenuHideContext else {
+            return
+        }
+        guard applicationMenusMayBeHidden else {
+            finishHidingApplicationMenus(reason: "watchdog-ineligible")
+            return
+        }
+        guard sections.contains(where: { $0.controlItem.state == .showSection }) else {
+            finishHidingApplicationMenus(reason: "watchdog-sections-hidden")
+            return
+        }
+        if ProcessInfo.processInfo.systemUptime - context.startedAt > 120 {
+            diagnosticLogger.write(
+                "APP_MENUS_WATCHDOG id=\(context.id.uuidString) action=forced-restore",
+                level: .warning
+            )
+            finishHidingApplicationMenus(reason: "watchdog-timeout")
+        }
     }
 
     /// Toggles the visibility of the application menus.
@@ -322,7 +508,7 @@ final class MenuBarManager: ObservableObject {
         if isHidingApplicationMenus {
             showApplicationMenus()
         } else {
-            hideApplicationMenus()
+            hideApplicationMenus(reason: "manual-toggle", evaluationID: -1)
         }
     }
 
