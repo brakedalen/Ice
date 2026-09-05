@@ -52,9 +52,12 @@ final class AutomationDiagnosticLogger: @unchecked Sendable {
     /// Appends a timestamped message to the diagnostic log.
     func write(_ message: String, level: Level = .info) {
         let sanitized = message.replacingOccurrences(of: "\n", with: " ")
+        // Timestamp the event, not the later file write. Queue delays during
+        // system load must not look like delays in a move or cursor release.
+        let occurredAt = Date()
 
         queue.async { [self] in
-            let timestamp = Self.timestampFormatter.string(from: Date())
+            let timestamp = Self.timestampFormatter.string(from: occurredAt)
             let line = "\(timestamp) [\(level.rawValue)] \(sanitized)\n"
             append(line)
         }

@@ -817,8 +817,10 @@ final class AutomationManager: ObservableObject {
             deferForActiveLayoutEditorMove(phase: "request-\(reason)")
             return
         }
+        let requestID = UUID()
+        let requestedAt = ProcessInfo.processInfo.systemUptime
         logInfo(
-            "ENFORCEMENT_REQUEST reason=\(reason) pending=\(pendingRestores.count) " +
+            "ENFORCEMENT_REQUEST id=\(requestID) reason=\(reason) pending=\(pendingRestores.count) " +
             "running=\(isEnforcing)"
         )
         if reason != "retry after failure" {
@@ -829,7 +831,7 @@ final class AutomationManager: ObservableObject {
             return
         }
         Task {
-            await enforceDesiredState()
+            await enforceDesiredState(requestID: requestID, requestedAt: requestedAt)
         }
     }
 
@@ -933,14 +935,21 @@ final class AutomationManager: ObservableObject {
 
     /// Moves items so that the menu bar matches the desired state
     /// (pending restores plus rule placements).
-    private func enforceDesiredState() async {
+    private func enforceDesiredState(requestID: UUID, requestedAt: TimeInterval) async {
         guard let appState, !isEnforcing else {
+            logInfo("ENFORCEMENT_COALESCED id=\(requestID)")
             return
         }
 
         isEnforcing = true
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        logInfo("ENFORCEMENT_PHASE id=\(requestID) phase=start queueMs=\(Int((startedAt - requestedAt) * 1_000))")
         let startingLayoutGeneration = appState.itemManager.layoutEditorMoveGeneration
         defer {
+            logInfo(
+                "ENFORCEMENT_PASS_END id=\(requestID) " +
+                "durationMs=\(Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000))"
+            )
             isEnforcing = false
             if needsAnotherPass {
                 needsAnotherPass = false
@@ -951,6 +960,10 @@ final class AutomationManager: ObservableObject {
         // Let the menu bar settle before touching anything. Newly
         // launched apps may still be adjusting their own items.
         try? await Task.sleep(for: .milliseconds(1_250))
+        logInfo(
+            "ENFORCEMENT_PHASE id=\(requestID) phase=settled " +
+            "elapsedMs=\(Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000))"
+        )
 
         guard !layoutChangedDuringEnforcement(
             expectedGeneration: startingLayoutGeneration,
@@ -962,7 +975,12 @@ final class AutomationManager: ObservableObject {
         // The request may have been based on a cache published before a user
         // drag. Always refresh after the settle delay so the current section,
         // window identifier, and divider geometry agree.
+        let cacheStartedAt = ProcessInfo.processInfo.systemUptime
         await appState.itemManager.cacheItemsRegardless()
+        logInfo(
+            "ENFORCEMENT_PHASE id=\(requestID) phase=cache-refreshed " +
+            "durationMs=\(Int((ProcessInfo.processInfo.systemUptime - cacheStartedAt) * 1_000))"
+        )
         guard !layoutChangedDuringEnforcement(
             expectedGeneration: startingLayoutGeneration,
             phase: "after-cache-refresh"
