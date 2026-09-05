@@ -38,6 +38,11 @@ final class MenuBarItemManager: ObservableObject {
     /// remain visible to cache and automation lookups across async move calls.
     private var rehidingItemContexts = [TemporarilyShownItemContext]()
 
+    /// Exact windows retired after their source/host terminates. A previously
+    /// fetched snapshot must not teach automation their temporary visible
+    /// location. Fresh snapshots remove entries once those windows disappear.
+    private var retiredTemporaryWindows = [CGWindowID: TemporaryRehideOwner]()
+
     /// Prevents overlapping rehide passes while the main actor is suspended
     /// in a menu bar move operation.
     private var isRehidingTemporaryItems = false
@@ -109,6 +114,14 @@ final class MenuBarItemManager: ObservableObject {
                 Task {
                     await self.cacheItemsIfNeeded()
                 }
+            }
+            .store(in: &c)
+
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didTerminateApplicationNotification)
+            .compactMap { $0.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] application in
+                self?.pruneTemporaryContexts(terminatedPID: application.processIdentifier)
             }
             .store(in: &c)
 
@@ -379,6 +392,10 @@ extension MenuBarItemManager {
         var context = CacheContext(controlItems: controlItems, displayID: displayID)
 
         for item in items where context.isValidForCaching(item) {
+            if let retiredOwner = retiredTemporaryWindows[item.windowID],
+               retiredOwner.matches(sourcePID: item.sourcePID, windowOwnerPID: item.ownerPID) {
+                continue
+            }
             if item.sourcePID == nil {
                 logger.warning("Missing sourcePID for \(item.logString, privacy: .public)")
                 context.shouldClearCachedItemWindowIDs = true
@@ -463,6 +480,7 @@ extension MenuBarItemManager {
     /// the hidden and always-hidden sections are correctly ordered,
     /// arranging them into valid positions if needed.
     func cacheItemsRegardless(_ currentItemWindowIDs: [CGWindowID]? = nil) async {
+        pruneTemporaryContexts()
         await cacheActor.runCacheTask { [weak self] in
             guard let self else {
                 return
@@ -475,6 +493,14 @@ extension MenuBarItemManager {
 
             let displayID = Bridging.getActiveMenuBarDisplayID()
             var items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+
+            if !retiredTemporaryWindows.isEmpty {
+                let itemsByID = Dictionary(items.map { ($0.windowID, $0) }, uniquingKeysWith: { first, _ in first })
+                retiredTemporaryWindows = retiredTemporaryWindows.filter { windowID, owner in
+                    guard let item = itemsByID[windowID] else { return false }
+                    return owner.matches(sourcePID: item.sourcePID, windowOwnerPID: item.ownerPID)
+                }
+            }
 
             let itemWindowIDs = currentItemWindowIDs ?? items.reversed().map { $0.windowID }
             await cacheActor.updateCachedItemWindowIDs(itemWindowIDs)
@@ -512,6 +538,9 @@ extension MenuBarItemManager {
     /// the hidden and always-hidden sections are correctly ordered,
     /// arranging them into valid positions if needed.
     func cacheItemsIfNeeded() async {
+        // This existing slow check also catches a missed termination notice,
+        // including when every pending rehide interaction is suspended.
+        pruneTemporaryContexts()
         let itemWindowIDs = Bridging.getMenuBarWindowList(option: [.itemsOnly, .activeSpace])
         if await cacheActor.cachedItemWindowIDs != itemWindowIDs {
             await cacheItemsRegardless(itemWindowIDs)
@@ -1433,17 +1462,22 @@ extension MenuBarItemManager {
     private func postMoveEvents(
         item: MenuBarItem,
         destination: MoveDestination,
-        safeDisplayID: CGDirectDisplayID?
+        safeDisplayID: CGDirectDisplayID?,
+        request: MenuBarMoveRequest
     ) async throws {
         try await eventSemaphore.waitUnlessCancelled()
         defer {
             eventSemaphore.signal()
         }
+        try request.checkValidity()
 
         let sourceBounds = try await getCurrentBounds(for: item)
+        try request.checkValidity()
         let targetBounds = try await getCurrentBounds(for: destination.targetItem)
+        try request.checkValidity()
         var itemOrigin = sourceBounds.origin
         let targetPoints = try await getTargetPoints(forMoving: item, to: destination)
+        try request.checkValidity()
 
         if let safeDisplayID {
             let displayBounds = CGDisplayBounds(safeDisplayID)
@@ -1507,6 +1541,7 @@ extension MenuBarItemManager {
         var timeout = getMoveOperationTimeout(for: item)
         logger.debug("Move operation timeout: \(timeout)")
 
+        try request.checkValidity()
         lastMoveOperationTimestamp = .now
         let cursorLease = MouseHelpers.hideCursor(owner: "move-events:\(item.tag)")
         defer {
@@ -1517,6 +1552,9 @@ extension MenuBarItemManager {
             updateMoveOperationTimeout(timeout, for: item)
         }
 
+        // Once mouse-down is posted, always finish its paired mouse-up (or
+        // fallback) even if ownership changes. Abort before another gesture,
+        // never halfway through cleanup where macOS could retain a drag.
         do {
             try await scrombleEvent(
                 mouseDown,
@@ -1555,8 +1593,10 @@ extension MenuBarItemManager {
                 logger.error("Fallback failed with error: \(error, privacy: .public)")
             }
             timeout += timeout / 2
+            try request.checkValidity()
             throw error
         }
+        try request.checkValidity()
     }
 
     /// Moves a menu bar item to the given destination.
@@ -1567,8 +1607,12 @@ extension MenuBarItemManager {
     func move(
         item: MenuBarItem,
         to destination: MoveDestination,
-        origin: MoveOrigin = .internalOperation
+        origin: MoveOrigin = .internalOperation,
+        requestIsValid: (() -> Bool)? = nil,
+        maximumAttempts: Int? = nil
     ) async throws {
+        let request = MenuBarMoveRequest(isValid: requestIsValid, maximumAttempts: maximumAttempts)
+        try request.checkValidity()
         guard item.isMovable else {
             throw EventError.itemNotMovable(item)
         }
@@ -1580,6 +1624,8 @@ extension MenuBarItemManager {
         defer {
             moveSemaphore.signal()
         }
+        // A manual move may have completed while this request was queued.
+        try request.checkValidity()
 
         let ownsLayoutEditorState = origin == .layoutEditor
         if ownsLayoutEditorState {
@@ -1618,6 +1664,7 @@ extension MenuBarItemManager {
                     destination: destination,
                     displayID: context.displayID
                 )
+                try request.checkValidity()
             }
 
             let verification: MovePositionVerification
@@ -1632,14 +1679,23 @@ extension MenuBarItemManager {
                 to: destination,
                 appState: appState,
                 safeDisplayID: revealContext?.displayID,
-                verification: verification
+                verification: verification,
+                request: request
             )
+            try request.checkValidity()
             revealFinishReason = "succeeded"
             diagnosticLogger.write(
                 "MOVE_SUCCESS origin=\(origin.rawValue) item=\(item.tag) windowID=\(item.windowID) " +
                 "target=\(destination.targetItem.tag) targetWindowID=\(destination.targetItem.windowID)"
             )
         } catch {
+            if error is MenuBarMoveRequest.Invalidated || error is CancellationError {
+                diagnosticLogger.write(
+                    "MOVE_CANCELLED origin=\(origin.rawValue) item=\(item.tag) windowID=\(item.windowID) " +
+                    "reason=\(error is MenuBarMoveRequest.Invalidated ? "superseded-request" : "task-cancelled")"
+                )
+                throw error
+            }
             diagnosticLogger.write(
                 "MOVE_FAILURE origin=\(origin.rawValue) item=\(item.tag) windowID=\(item.windowID) " +
                 "target=\(destination.targetItem.tag) targetWindowID=\(destination.targetItem.windowID) " +
@@ -1658,9 +1714,20 @@ extension MenuBarItemManager {
         to destination: MoveDestination,
         appState: AppState,
         safeDisplayID: CGDirectDisplayID?,
-        verification: MovePositionVerification
+        verification: MovePositionVerification,
+        request: MenuBarMoveRequest
     ) async throws {
-        try await waitForUserToPauseInput()
+        if request.hasValidityCondition {
+            // A queued temporary return can become obsolete while waiting for
+            // input. Keep the validity check in this task so it can exit then.
+            while !hasUserPausedInput(for: .milliseconds(50)) {
+                try request.checkValidity()
+                try await Task.sleep(for: .milliseconds(250))
+            }
+        } else {
+            try await waitForUserToPauseInput()
+        }
+        try request.checkValidity()
 
         appState.hidEventManager.stopAll()
         defer {
@@ -1668,6 +1735,7 @@ extension MenuBarItemManager {
         }
 
         try await waitForMoveOperationBuffer()
+        try request.checkValidity()
 
         logger.log(
             """
@@ -1681,39 +1749,45 @@ extension MenuBarItemManager {
             "targetWindowID=\(destination.targetItem.windowID) mode=\(verification.logString)"
         )
 
-        guard try await !itemHasCorrectPosition(
+        let alreadyCorrect = try await itemHasCorrectPosition(
             item: item,
             for: destination,
             verification: verification
-        ) else {
+        )
+        try request.checkValidity()
+        guard !alreadyCorrect else {
             logger.debug("Item has correct position, cancelling move")
             return
         }
 
-        let maxAttempts = safeDisplayID == nil ? 8 : 3
+        let maxAttempts = request.attemptLimit(default: safeDisplayID == nil ? 8 : 3)
         for n in 1...maxAttempts {
-            guard !Task.isCancelled else {
-                throw EventError.cannotComplete
-            }
+            try request.checkValidity()
             do {
-                if try await itemHasCorrectPosition(
+                let isCorrect = try await itemHasCorrectPosition(
                     item: item,
                     for: destination,
                     verification: verification
-                ) {
+                )
+                try request.checkValidity()
+                if isCorrect {
                     logger.debug("Item has correct position, finished with move")
                     return
                 }
                 try await postMoveEvents(
                     item: item,
                     destination: destination,
-                    safeDisplayID: safeDisplayID
+                    safeDisplayID: safeDisplayID,
+                    request: request
                 )
-                guard try await waitForMoveToSettle(
+                try request.checkValidity()
+                let didSettle = try await waitForMoveToSettle(
                     item: item,
                     at: destination,
                     verification: verification
-                ) else {
+                )
+                try request.checkValidity()
+                guard didSettle else {
                     diagnosticLogger.write(
                         "MOVE_POSTCONDITION_FAILURE item=\(item.tag) windowID=\(item.windowID) " +
                         "targetWindowID=\(destination.targetItem.windowID) " +
@@ -1733,6 +1807,10 @@ extension MenuBarItemManager {
                 logger.debug("Attempt \(n, privacy: .public) succeeded, finished with move")
                 return
             } catch {
+                if error is MenuBarMoveRequest.Invalidated || error is CancellationError {
+                    throw error
+                }
+                try request.checkValidity()
                 logger.debug("Attempt \(n, privacy: .public) failed: \(error, privacy: .public)")
                 if let eventError = error as? EventError {
                     switch eventError {
@@ -1746,6 +1824,7 @@ extension MenuBarItemManager {
                 }
                 if n < maxAttempts {
                     try await waitForMoveOperationBuffer()
+                    try request.checkValidity()
                     continue
                 }
                 if error is EventError {
@@ -2436,6 +2515,12 @@ extension MenuBarItemManager {
         /// correct context when several items share the same tag.
         let sourcePID: pid_t?
 
+        /// Retain the specific process lifetimes rather than inferring death
+        /// from a missing status window (which may merely be on another Space).
+        let processOwner: TemporaryRehideOwner
+        let sourceApplication: NSRunningApplication?
+        let windowOwnerApplication: NSRunningApplication?
+
         /// The destination to return the item to.
         let returnDestination: MoveDestination
 
@@ -2448,8 +2533,8 @@ extension MenuBarItemManager {
         /// The window of the item's shown interface.
         var shownInterfaceWindow: WindowInfo?
 
-        /// The number of attempts that have been made to rehide the item.
-        var rehideAttempts = 0
+        /// Bounded retries across all timer firings for this interaction.
+        var rehideRetry = TemporaryRehideRetryState()
 
         /// The number of rehide checks where the item window was absent.
         var missingItemAttempts = 0
@@ -2484,6 +2569,9 @@ extension MenuBarItemManager {
             self.windowID = item.windowID
             self.tag = item.tag
             self.sourcePID = item.sourcePID
+            self.processOwner = TemporaryRehideOwner(sourcePID: item.sourcePID, windowOwnerPID: item.ownerPID)
+            self.sourceApplication = item.sourcePID.flatMap { NSRunningApplication(processIdentifier: $0) }
+            self.windowOwnerApplication = NSRunningApplication(processIdentifier: item.ownerPID)
             self.returnDestination = returnDestination
             self.originalSection = originalAddress.section
             self.originalIndex = originalAddress.index
@@ -2540,6 +2628,43 @@ extension MenuBarItemManager {
             return
         }
         appState?.automationManager.resumeAfterTemporaryShow(forAutomationKey: key)
+    }
+
+    /// A dead source/host cannot complete this interaction. Remove its context
+    /// even after retry suspension, so a replacement app instance is eligible
+    /// for normal placement restoration. A live source with a missing window
+    /// keeps its original intent and the existing missing-window retry policy.
+    private func pruneTemporaryContexts(terminatedPID: pid_t? = nil) {
+        let expired = (temporarilyShownItemContexts + rehidingItemContexts).filter { context in
+            if let terminatedPID, context.processOwner.wasTerminated(terminatedPID) {
+                return true
+            }
+            return context.sourceApplication?.isTerminated == true ||
+                context.windowOwnerApplication?.isTerminated == true
+        }
+        guard !expired.isEmpty else {
+            return
+        }
+        let expiredIDs = Set(expired.map(ObjectIdentifier.init))
+        for context in expired {
+            retiredTemporaryWindows[context.windowID] = context.processOwner
+        }
+        temporarilyShownItemContexts.removeAll { expiredIDs.contains(ObjectIdentifier($0)) }
+        rehidingItemContexts.removeAll { expiredIDs.contains(ObjectIdentifier($0)) }
+        for context in expired {
+            logTemporaryItemEvent(
+                "TEMP_SHOW_CONTEXT_EXPIRED",
+                context: context,
+                details: "reason=application-terminated suspended=\(context.rehideRetry.isSuspended)"
+            )
+        }
+        if !temporarilyShownItemContexts.contains(where: { !$0.rehideRetry.isSuspended }) {
+            rehideTimer?.invalidate()
+            rehideTimer = nil
+        }
+        for key in Set(expired.compactMap { $0.tag.automationKey }) {
+            resumeAutomationIfNeeded(for: key)
+        }
     }
 
     private func logTemporaryItemEvent(
@@ -2707,7 +2832,10 @@ extension MenuBarItemManager {
     /// Schedules a timer for the given interval that rehides the
     /// temporarily shown items when fired.
     private func runRehideTimer(for interval: TimeInterval? = nil) {
-        guard let appState else {
+        guard let appState,
+              temporarilyShownItemContexts.contains(where: { !$0.rehideRetry.isSuspended }) else {
+            rehideTimer?.invalidate()
+            rehideTimer = nil
             return
         }
         let interval = interval ?? appState.settings.advanced.tempShowInterval
@@ -2723,6 +2851,28 @@ extension MenuBarItemManager {
                 await self.rehideTemporarilyShownItems()
             }
         }
+        rehideTimer?.tolerance = min(1, interval * 0.1)
+    }
+
+    /// Keeps the original logical placement when a third-party item refuses to move.
+    /// After the budget is exhausted, only a new user interaction/manual move may
+    /// retry or replace this context. Do not teach placement memory that the
+    /// temporary visible position was an intentional move.
+    private func recordRehideFailure(
+        context: TemporarilyShownItemContext,
+        item: MenuBarItem? = nil,
+        reason: String
+    ) {
+        let delay = context.rehideRetry.recordFailure(now: ProcessInfo.processInfo.systemUptime)
+        logTemporaryItemEvent(
+            delay == nil ? "TEMP_REHIDE_SUSPENDED" : "TEMP_REHIDE_RETRY_SCHEDULED",
+            context: context,
+            item: item,
+            details: "attempt=\(context.rehideRetry.failureCount) " +
+                "nextDelay=\(delay.map(String.init(describing:)) ?? "none") " +
+                "reason=\(reason) retainedOriginalPlacement=true",
+            level: .warning
+        )
     }
 
     /// Temporarily shows the given item.
@@ -2901,14 +3051,25 @@ extension MenuBarItemManager {
     /// If an item is currently showing its interface, this method waits
     /// for the interface to close before hiding the items.
     func rehideTemporarilyShownItems() async {
-        guard let appState else {
+        guard appState != nil else {
             logger.error("Missing AppState, so not rehiding")
             return
         }
-        guard !temporarilyShownItemContexts.isEmpty else {
+        pruneTemporaryContexts()
+        let now = ProcessInfo.processInfo.systemUptime
+        let retryDelays = temporarilyShownItemContexts.compactMap { $0.rehideRetry.delayUntilRetry(now: now) }
+        guard let nextDelay = retryDelays.min() else {
             return
         }
         guard !isRehidingTemporaryItems else {
+            return
+        }
+        guard nextDelay == 0 else {
+            runRehideTimer(for: nextDelay)
+            return
+        }
+        guard !isLayoutEditorMoveActive, !isOneDriveNativeRevealActive else {
+            runRehideTimer(for: 3)
             return
         }
         guard !temporarilyShownItemContexts.contains(where: { $0.isShowingInterface }) else {
@@ -2927,24 +3088,44 @@ extension MenuBarItemManager {
             isRehidingTemporaryItems = false
         }
 
-        var currentContexts = temporarilyShownItemContexts
+        // Timer firings and new clicks must not bypass another item's backoff.
+        var currentContexts = temporarilyShownItemContexts.filter {
+            $0.rehideRetry.delayUntilRetry(now: now) == 0
+        }
         let automationKeysBeforeRehide = Set(currentContexts.compactMap { $0.tag.automationKey })
-        temporarilyShownItemContexts.removeAll()
+        temporarilyShownItemContexts.removeAll { context in
+            currentContexts.contains { $0 === context }
+        }
         rehidingItemContexts = currentContexts
 
-        let items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
         var failedContexts = [TemporarilyShownItemContext]()
-
-        appState.hidEventManager.stopAll()
-        defer {
-            appState.hidEventManager.startAll()
-        }
-
-        await eventSleep(for: .milliseconds(250))
+        let startedAt = ProcessInfo.processInfo.systemUptime
 
         logger.debug("Rehiding temporarily shown items")
 
         while let context = currentContexts.popLast() {
+            // A manual move may remove this context across any await.
+            guard rehidingItemContexts.contains(where: { $0 === context }) else {
+                continue
+            }
+            if Task.isCancelled || isLayoutEditorMoveActive || isOneDriveNativeRevealActive ||
+                context.isShowingInterface || !hasUserPausedInput(for: .milliseconds(250)) {
+                failedContexts.append(context)
+                failedContexts.append(contentsOf: currentContexts)
+                break
+            }
+            let layoutGeneration = layoutEditorMoveGeneration
+            // Resolve recreated windows and anchors afresh on every attempt.
+            let items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+            guard rehidingItemContexts.contains(where: { $0 === context }) else {
+                continue
+            }
+            if layoutEditorMoveGeneration != layoutGeneration || Task.isCancelled ||
+                isLayoutEditorMoveActive || isOneDriveNativeRevealActive {
+                failedContexts.append(context)
+                failedContexts.append(contentsOf: currentContexts)
+                break
+            }
             guard let item = resolveCurrentItem(for: context, in: items) else {
                 context.missingItemAttempts += 1
                 if context.missingItemAttempts < 20 {
@@ -2967,15 +3148,8 @@ extension MenuBarItemManager {
             }
             context.missingItemAttempts = 0
             guard let resolvedDestination = resolveRehideDestination(for: context, in: items) else {
-                context.rehideAttempts += 1
+                recordRehideFailure(context: context, reason: "destination-missing")
                 failedContexts.append(context)
-                logTemporaryItemEvent(
-                    "TEMP_REHIDE_WAITING",
-                    context: context,
-                    item: item,
-                    details: "reason=destination-missing attempt=\(context.rehideAttempts)",
-                    level: .warning
-                )
                 continue
             }
             if resolvedDestination.usedSectionFallback {
@@ -2988,51 +3162,74 @@ extension MenuBarItemManager {
                 )
             }
             do {
-                try await move(item: item, to: resolvedDestination.destination)
+                // performMove owns monitor suppression only while moving.
+                // Keep monitors running during settling and semaphore waits.
+                await eventSleep(for: .milliseconds(250))
+                guard rehidingItemContexts.contains(where: { $0 === context }) else {
+                    continue
+                }
+                if Task.isCancelled || isLayoutEditorMoveActive || isOneDriveNativeRevealActive ||
+                    context.isShowingInterface {
+                    failedContexts.append(context)
+                    failedContexts.append(contentsOf: currentContexts)
+                    break
+                }
+                try await move(
+                    item: item,
+                    to: resolvedDestination.destination,
+                    requestIsValid: { [weak self] in
+                        guard let self else { return false }
+                        return layoutEditorMoveGeneration == layoutGeneration &&
+                            rehidingItemContexts.contains(where: { $0 === context }) &&
+                            !isLayoutEditorMoveActive && !isOneDriveNativeRevealActive &&
+                            !context.isShowingInterface
+                    },
+                    maximumAttempts: 1
+                )
                 logTemporaryItemEvent("TEMP_REHIDE_SUCCESS", context: context, item: item)
             } catch {
-                context.rehideAttempts += 1
-                logger.warning(
-                    """
-                    Attempt \(context.rehideAttempts, privacy: .public) to rehide \
-                    \(item.logString, privacy: .public) failed with error: \
-                    \(error, privacy: .public)
-                    """
-                )
-                if context.rehideAttempts < 3 {
-                    currentContexts.append(context) // Try again.
-                } else {
-                    // Failed contexts are ultimately added back to the array
-                    // and rehidden after a longer delay, so reset the count.
-                    context.rehideAttempts = 0
-                    failedContexts.append(context)
+                guard rehidingItemContexts.contains(where: { $0 === context }) else {
+                    continue
                 }
-                logTemporaryItemEvent(
-                    "TEMP_REHIDE_FAILURE",
-                    context: context,
-                    item: item,
-                    details: "attempt=\(context.rehideAttempts) error=\(String(describing: error))",
-                    level: .warning
-                )
+                if error is MenuBarMoveRequest.Invalidated || error is CancellationError || Task.isCancelled {
+                    logTemporaryItemEvent(
+                        "TEMP_REHIDE_DEFERRED",
+                        context: context,
+                        item: item,
+                        details: "reason=interrupted-or-superseded attempt=\(context.rehideRetry.failureCount)"
+                    )
+                } else {
+                    recordRehideFailure(context: context, item: item, reason: String(describing: error))
+                }
+                failedContexts.append(context)
             }
         }
 
-        if failedContexts.isEmpty {
-            logger.debug("All items were successfully rehidden")
-        } else {
-            logger.error(
-                """
-                Some items failed to rehide: \
-                \(failedContexts.map { $0.tag }, privacy: .public)
-                """
-            )
-        }
-
+        // Do not put manually removed contexts back after an awaited move.
+        temporarilyShownItemContexts.append(contentsOf: failedContexts.reversed().filter { context in
+            rehidingItemContexts.contains { $0 === context }
+        })
         rehidingItemContexts.removeAll()
-        temporarilyShownItemContexts.append(contentsOf: failedContexts.reversed())
-        if !failedContexts.isEmpty {
-            runRehideTimer(for: 3)
+        let pendingDelays = temporarilyShownItemContexts.compactMap {
+            $0.rehideRetry.delayUntilRetry(now: ProcessInfo.processInfo.systemUptime)
         }
+        switch TemporaryRehideTimerAction.decide(
+            pendingDelays: pendingDelays,
+            hasValidTimer: rehideTimer?.isValid == true
+        ) {
+        case .schedule(let delay):
+            runRehideTimer(for: delay)
+        case .keepExisting:
+            break // Preserve the full temporary-show interval from a new click.
+        case .stop:
+            rehideTimer?.invalidate()
+            rehideTimer = nil
+        }
+        diagnosticLogger.write(
+            "TEMP_REHIDE_PASS durationMs=\(Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000)) " +
+            "pending=\(pendingDelays.count) " +
+            "suspended=\(temporarilyShownItemContexts.filter { $0.rehideRetry.isSuspended }.count)"
+        )
 
         for key in automationKeysBeforeRehide {
             resumeAutomationIfNeeded(for: key)
