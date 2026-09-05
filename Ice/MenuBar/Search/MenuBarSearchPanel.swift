@@ -16,6 +16,9 @@ final class MenuBarSearchPanel: NSPanel {
     /// Storage for internal observers.
     private var cancellables = Set<AnyCancellable>()
 
+    private var pendingShowID: UUID?
+    private var pendingShowTask: Task<Void, Never>?
+
     /// Model for menu bar item search.
     private let model = MenuBarSearchModel()
 
@@ -111,12 +114,25 @@ final class MenuBarSearchPanel: NSPanel {
             Logger.default.error("Missing screen for search panel")
             return
         }
+        pendingShowTask?.cancel()
+        let showID = UUID()
+        pendingShowID = showID
 
         // Important that we set the navigation state before updating the cache.
         appState.navigationState.isSearchPresented = true
 
-        Task {
+        pendingShowTask = Task {
+            defer {
+                if pendingShowID == showID {
+                    pendingShowID = nil
+                    pendingShowTask = nil
+                }
+            }
             await appState.imageCache.updateCache()
+
+            // Closing or moving to another Space while capture is pending
+            // must not allow an old completion to reopen the search panel.
+            guard !Task.isCancelled, pendingShowID == showID else { return }
 
             let hostingView = MenuBarSearchHostingView(appState: appState, model: model, displayID: screen.displayID, panel: self)
             hostingView.setFrameSize(hostingView.intrinsicContentSize)
@@ -140,11 +156,14 @@ final class MenuBarSearchPanel: NSPanel {
 
     /// Toggles the panel's visibility.
     func toggle() {
-        if isVisible { close() } else { show() }
+        if isVisible || pendingShowID != nil { close() } else { show() }
     }
 
     /// Dismisses the search panel.
     override func close() {
+        pendingShowID = nil
+        pendingShowTask?.cancel()
+        pendingShowTask = nil
         super.close()
         contentView = nil
         mouseDownMonitor.stop()

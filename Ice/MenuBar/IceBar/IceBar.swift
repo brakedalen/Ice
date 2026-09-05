@@ -19,6 +19,11 @@ final class IceBarPanel: NSPanel {
     /// The currently displayed section.
     private(set) var currentSection: MenuBarSection.Name?
 
+    /// Identifies the presentation waiting for icon capture. A close or newer
+    /// show invalidates it, preventing a delayed capture from reopening the bar.
+    private var pendingShowID: UUID?
+    private var pendingCaptureTask: Task<Void, any Error>?
+
     /// Storage for internal observers.
     private var cancellables = Set<AnyCancellable>()
 
@@ -162,6 +167,9 @@ final class IceBarPanel: NSPanel {
         guard let appState else {
             return
         }
+        pendingCaptureTask?.cancel()
+        let showID = UUID()
+        pendingShowID = showID
 
         // IMPORTANT: We must set the navigation state and current section
         // before updating the caches.
@@ -172,12 +180,29 @@ final class IceBarPanel: NSPanel {
             await appState.itemManager.cacheItemsIfNeeded()
             await appState.imageCache.updateCache()
         }
+        pendingCaptureTask = cacheTask
 
         do {
-            try await cacheTask.value
+            try await withTaskCancellationHandler {
+                try await cacheTask.value
+            } onCancel: {
+                cacheTask.cancel()
+            }
         } catch {
-            Logger.default.error("Cache update failed when showing IceBarPanel - \(error)")
+            if !cacheTask.isCancelled, !Task.isCancelled {
+                Logger.default.error("Cache update failed when showing IceBarPanel - \(error)")
+            }
         }
+
+        guard pendingShowID == showID else {
+            return
+        }
+        pendingCaptureTask = nil
+        guard !Task.isCancelled else {
+            close()
+            return
+        }
+        pendingShowID = nil
 
         contentView = IceBarHostingView(
             appState: appState,
@@ -211,6 +236,9 @@ final class IceBarPanel: NSPanel {
     }
 
     override func close() {
+        pendingShowID = nil
+        pendingCaptureTask?.cancel()
+        pendingCaptureTask = nil
         super.close()
         contentView = nil
         currentSection = nil

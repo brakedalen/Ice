@@ -8,6 +8,8 @@ import ScreenCaptureKit
 
 /// A namespace for screen capture operations.
 enum ScreenCapture {
+    @MainActor private static var cachedPermissionResult: Bool?
+
     /// Result of capturing independent, on-screen windows through
     /// ScreenCaptureKit. Missing windows are intentionally returned to the
     /// caller so it can use the legacy API for off-screen status items.
@@ -42,16 +44,21 @@ enum ScreenCapture {
     /// This function caches its initial result and returns it on subsequent
     /// calls. Pass `true` to the `reset` parameter to replace the cached
     /// result with a newly computed value.
+    @MainActor
     static func cachedCheckPermissions(reset: Bool = false) -> Bool {
-        enum Context {
-            static var cachedResult: Bool?
-        }
-        if !reset, let result = Context.cachedResult, result {
+        if !reset, let result = cachedPermissionResult {
             return result
         }
         let result = checkPermissions()
-        Context.cachedResult = result
+        cachedPermissionResult = result
         return result
+    }
+
+    /// Permission monitoring owns live checks. Updating both granted and
+    /// denied results keeps rendering paths cheap without retaining a stale grant.
+    @MainActor
+    static func updateCachedPermissions(_ granted: Bool) {
+        cachedPermissionResult = granted
     }
 
     /// Requests screen capture permissions.
@@ -109,7 +116,8 @@ enum ScreenCapture {
     static func captureOnScreenWindows(
         with windowIDs: Set<CGWindowID>,
         scale: CGFloat
-    ) async -> ModernWindowCaptureResult {
+    ) async throws -> ModernWindowCaptureResult {
+        try Task.checkCancellation()
         guard !windowIDs.isEmpty else {
             return ModernWindowCaptureResult()
         }
@@ -119,6 +127,7 @@ enum ScreenCapture {
                 false,
                 onScreenWindowsOnly: true
             )
+            try Task.checkCancellation()
             let windowsByID = Dictionary(
                 uniqueKeysWithValues: content.windows
                     .filter { windowIDs.contains($0.windowID) }
@@ -129,6 +138,7 @@ enum ScreenCapture {
             result.unavailableWindowIDs = windowIDs.subtracting(windowsByID.keys)
 
             for windowID in windowIDs.sorted() {
+                try Task.checkCancellation()
                 guard let window = windowsByID[windowID] else {
                     continue
                 }
@@ -146,14 +156,21 @@ enum ScreenCapture {
                         contentFilter: filter,
                         configuration: configuration
                     )
+                    try Task.checkCancellation()
                     result.images[windowID] = image
                 } catch {
+                    // Some system APIs report cancellation as an NSError.
+                    // Never turn cancelled work into additional fallback work.
+                    try Task.checkCancellation()
+                    if error is CancellationError { throw error }
                     result.unavailableWindowIDs.insert(windowID)
                     result.errorDescription = String(describing: error)
                 }
             }
             return result
         } catch {
+            try Task.checkCancellation()
+            if error is CancellationError { throw error }
             return ModernWindowCaptureResult(
                 unavailableWindowIDs: windowIDs,
                 errorDescription: String(describing: error)

@@ -41,6 +41,8 @@ struct PermissionsView: View {
         .padding(.horizontal)
         .frame(width: 550)
         .fixedSize()
+        .onAppear { manager.setPermissionUIVisible(true) }
+        .onDisappear { manager.setPermissionUIVisible(false) }
     }
 
     @ViewBuilder
@@ -105,6 +107,7 @@ struct PermissionsView: View {
     @ViewBuilder
     private var continueButton: some View {
         Button {
+            manager.setPermissionUIVisible(false)
             appState.dismissWindow(.permissions)
 
             guard manager.permissionsState != .missing else {
@@ -156,7 +159,9 @@ struct PermissionsView: View {
                         appState.openWindow(.permissions)
                     } else {
                         Task {
-                            await permission.waitForPermission()
+                            guard await permission.waitForPermission() else {
+                                return
+                            }
                             appState.activate(withPolicy: .regular)
                             appState.openWindow(.permissions)
                         }

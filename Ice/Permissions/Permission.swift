@@ -40,8 +40,21 @@ class Permission: ObservableObject, Identifiable {
     /// Observer that runs on a timer to check permissions.
     private var timerCancellable: AnyCancellable?
 
-    /// Observer that observes the ``hasPermission`` property.
-    private var hasPermissionCancellable: AnyCancellable?
+    /// Pending requests have independent continuations, so repeated requests
+    /// and cancellation cannot strand an earlier caller.
+    private var waiters = [UUID: CheckedContinuation<Bool, Never>]()
+
+    private let onCheck: (Bool) -> Void
+    private let now: () -> TimeInterval
+    private let diagnosticLog: (String) -> Void
+    private let schedulesChecks: Bool
+    private var checksEnabled = true
+    private var isPermissionUIVisible = false
+    private var requestPollingDeadline: TimeInterval?
+    private var checkCount = 0
+
+    /// The active polling policy. Exposed internally for deterministic QA.
+    private(set) var pollingInterval: TimeInterval?
 
     /// Creates a permission.
     ///
@@ -59,7 +72,11 @@ class Permission: ObservableObject, Identifiable {
         mayRequireRelaunch: Bool = false,
         settingsURLs: [URL] = [],
         check: @escaping () -> Bool,
-        request: @escaping () -> Void
+        request: @escaping () -> Void,
+        onCheck: @escaping (Bool) -> Void = { _ in },
+        now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        schedulesChecks: Bool = true,
+        diagnosticLog: @escaping (String) -> Void = { AutomationDiagnosticLogger.shared.write($0) }
     ) {
         self.title = title
         self.details = details
@@ -68,27 +85,90 @@ class Permission: ObservableObject, Identifiable {
         self.settingsURLs = settingsURLs
         self.check = check
         self.request = request
-        self.hasPermission = check()
-        configureCancellables()
+        self.onCheck = onCheck
+        self.now = now
+        self.schedulesChecks = schedulesChecks
+        self.diagnosticLog = diagnosticLog
+        refresh(reason: "startup")
     }
 
-    /// Sets up the internal observers for the permission.
-    private func configureCancellables() {
-        timerCancellable = Timer.publish(every: 1, on: .main, in: .default)
+    /// Performs a live check, synchronizing capture consumers before publishing
+    /// a real state transition. Unchanged checks do not invalidate SwiftUI.
+    func refresh(reason: String) {
+        let start = now()
+        let granted = check()
+        let durationMs = max(Int((now() - start) * 1_000), 0)
+        checkCount += 1
+        onCheck(granted)
+
+        let changed = hasPermission != granted
+        if changed {
+            hasPermission = granted
+        }
+        if granted {
+            requestPollingDeadline = nil
+            finishAllWaiters(granted: true)
+        }
+        if changed || checkCount == 1 || durationMs >= 100 {
+            diagnosticLog(
+                "PERMISSION_CHECK permission=\(title) reason=\(reason) granted=\(granted) " +
+                "changed=\(changed) count=\(checkCount) durationMs=\(durationMs)"
+            )
+        }
+        updatePolling()
+    }
+
+    /// Keeps revocation detection active for this background accessory app,
+    /// while allowing macOS to coalesce the infrequent idle timer.
+    private func updatePolling() {
+        guard checksEnabled else {
+            return
+        }
+        let requestIsRecent = requestPollingDeadline.map { now() < $0 } ?? false
+        let interval: TimeInterval = !hasPermission && (isPermissionUIVisible || requestIsRecent) ? 1 : 30
+        guard pollingInterval != interval else {
+            return
+        }
+        timerCancellable?.cancel()
+        timerCancellable = nil
+        pollingInterval = interval
+        diagnosticLog("PERMISSION_POLLING permission=\(title) intervalSeconds=\(Int(interval))")
+        guard schedulesChecks else {
+            return
+        }
+        timerCancellable = Timer.publish(every: interval, tolerance: interval / 5, on: .main, in: .default)
             .autoconnect()
-            .merge(with: Just(.now))
             .sink { [weak self] _ in
-                guard let self else {
-                    return
-                }
-                hasPermission = check()
+                self?.refresh(reason: "timer")
             }
+    }
+
+    func setPermissionUIVisible(_ isVisible: Bool) {
+        guard isPermissionUIVisible != isVisible else {
+            return
+        }
+        isPermissionUIVisible = isVisible
+        if isVisible {
+            refresh(reason: "permission-ui")
+        } else {
+            updatePolling()
+        }
+    }
+
+    private func beginRequestPolling() {
+        checksEnabled = true
+        // A forgotten System Settings window must not leave one-second
+        // polling running forever. The slow safety check continues afterward.
+        requestPollingDeadline = now() + 120
+        updatePolling()
     }
 
     /// Performs the request and opens the System Settings app to the appropriate pane.
     func performRequest() {
+        beginRequestPolling()
         request()
         openSettingsPane()
+        refresh(reason: "request")
     }
 
     /// Opens the most relevant System Settings pane for the permission.
@@ -129,32 +209,53 @@ class Permission: ObservableObject, Identifiable {
         return false
     }
 
-    /// Asynchronously waits for the app to be granted this permission.
-    func waitForPermission() async {
-        configureCancellables()
-        guard !hasPermission else {
-            return
+    /// Returns `false` if the caller is cancelled or permission checks stop.
+    func waitForPermission() async -> Bool {
+        guard !Task.isCancelled else {
+            return false
         }
-        return await withCheckedContinuation { continuation in
-            hasPermissionCancellable = $hasPermission.sink { [weak self] hasPermission in
-                guard let self else {
-                    continuation.resume()
-                    return
-                }
-                if hasPermission {
-                    hasPermissionCancellable?.cancel()
-                    continuation.resume()
+        beginRequestPolling()
+        refresh(reason: "wait")
+        guard !hasPermission else {
+            return true
+        }
+
+        let id = UUID()
+        let granted = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                // Cancellation can precede registration. Both this check and
+                // registration run on the main actor without suspension.
+                if Task.isCancelled || !checksEnabled {
+                    continuation.resume(returning: false)
+                } else {
+                    waiters[id] = continuation
                 }
             }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.waiters.removeValue(forKey: id)?.resume(returning: false)
+            }
+        }
+        return granted && !Task.isCancelled
+    }
+
+    private func finishAllWaiters(granted: Bool) {
+        let pending = waiters
+        waiters.removeAll()
+        for continuation in pending.values {
+            continuation.resume(returning: granted)
         }
     }
 
     /// Stops running the permission check.
     func stopCheck() {
+        checksEnabled = false
         timerCancellable?.cancel()
         timerCancellable = nil
-        hasPermissionCancellable?.cancel()
-        hasPermissionCancellable = nil
+        pollingInterval = nil
+        requestPollingDeadline = nil
+        finishAllWaiters(granted: false)
+        diagnosticLog("PERMISSION_POLLING permission=\(title) stopped=true")
     }
 }
 
@@ -203,6 +304,9 @@ final class ScreenRecordingPermission: Permission {
             },
             request: {
                 ScreenCapture.requestPermissions()
+            },
+            onCheck: {
+                ScreenCapture.updateCachedPermissions($0)
             }
         )
     }
