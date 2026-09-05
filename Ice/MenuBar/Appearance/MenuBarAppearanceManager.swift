@@ -63,12 +63,9 @@ final class MenuBarAppearanceManager: ObservableObject {
                 guard let self else {
                     return
                 }
-                while let panel = overlayPanels.popFirst() {
-                    panel.orderOut(self)
-                }
-                if Set(overlayPanels.map { $0.owningScreen }) != Set(NSScreen.screens) {
-                    configureOverlayPanels(with: configuration)
-                }
+                // NSScreen objects can keep the same identity while their geometry
+                // changes. Rebuild for a display change and tear down all old work.
+                reconcileOverlayPanels(configuration: configuration, preview: previewConfiguration, rebuild: true)
             }
             .store(in: &c)
 
@@ -84,61 +81,65 @@ final class MenuBarAppearanceManager: ObservableObject {
             }
             .store(in: &c)
 
-        $configuration
+        $configuration.combineLatest($previewConfiguration)
+            // @Published emits in willSet. Defer reconciliation until both stored
+            // properties are committed, so a new content view sees the same state.
+            .receive(on: DispatchQueue.main)
             .throttle(for: 0.1, scheduler: DispatchQueue.main, latest: true)
-            .sink { [weak self] configuration in
+            .sink { [weak self] configuration, preview in
                 guard let self else {
                     return
                 }
-                // The overlay panels may not have been configured yet. Since some of the
-                // properties on the manager might call for them, try to configure now.
-                if overlayPanels.isEmpty {
-                    configureOverlayPanels(with: configuration)
-                }
+                reconcileOverlayPanels(configuration: configuration, preview: preview)
+            }
+            .store(in: &c)
+
+        // A dynamic configuration may need panels in only one system appearance.
+        DistributedNotificationCenter.default()
+            .publisher(for: DistributedNotificationCenter.interfaceThemeChangedNotification)
+            .debounce(for: 0.1, scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                reconcileOverlayPanels(configuration: configuration, preview: previewConfiguration)
             }
             .store(in: &c)
 
         cancellables = c
     }
 
-    /// Returns a Boolean value that indicates whether a set of overlay panels
-    /// is needed for the given configuration.
-    private func needsOverlayPanels(for configuration: MenuBarAppearanceConfigurationV2) -> Bool {
-        let current = configuration.current
-        if current.hasShadow {
-            return true
-        }
-        if current.hasBorder {
-            return true
-        }
-        if configuration.shapeKind != .noShape {
-            return true
-        }
-        if current.tintKind != .noTint {
-            return true
-        }
-        return false
-    }
-
-    /// Configures the manager's overlay panels, if required by the given configuration.
-    private func configureOverlayPanels(with configuration: MenuBarAppearanceConfigurationV2) {
-        guard
-            let appState,
-            needsOverlayPanels(for: configuration)
-        else {
+    /// Reconciles panel lifetime with the effective appearance, including previews.
+    private func reconcileOverlayPanels(
+        configuration: MenuBarAppearanceConfigurationV2,
+        preview: MenuBarAppearancePartialConfiguration?,
+        rebuild: Bool = false
+    ) {
+        let policy = MenuBarAppearanceUpdatePolicy(configuration: configuration, preview: preview)
+        let previousCount = overlayPanels.count
+        if rebuild || !policy.needsOverlay || appState == nil {
             while let panel = overlayPanels.popFirst() {
                 panel.close()
             }
-            return
         }
 
-        var overlayPanels = Set<MenuBarOverlayPanel>()
-        for screen in NSScreen.screens {
-            let panel = MenuBarOverlayPanel(appState: appState, owningScreen: screen)
-            overlayPanels.insert(panel)
-            panel.needsShow = true
+        if let appState, policy.needsOverlay {
+            if overlayPanels.isEmpty {
+                for screen in NSScreen.screens {
+                    let panel = MenuBarOverlayPanel(appState: appState, owningScreen: screen, updatePolicy: policy)
+                    overlayPanels.insert(panel)
+                    panel.needsShow = true
+                }
+            } else {
+                for panel in overlayPanels {
+                    panel.applyUpdatePolicy(policy)
+                }
+            }
         }
 
-        self.overlayPanels = overlayPanels
+        if rebuild || previousCount != overlayPanels.count {
+            AutomationDiagnosticLogger.shared.write(
+                "APPEARANCE_PANELS previous=\(previousCount) current=\(overlayPanels.count) " +
+                "rebuild=\(rebuild) menuFrame=\(policy.needsApplicationMenuFrame) wallpaper=\(policy.needsDesktopWallpaper)"
+            )
+        }
     }
 }

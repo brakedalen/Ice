@@ -26,6 +26,7 @@ final class MenuBarOverlayPanel: NSPanel {
     }
 
     /// A context that manages panel update tasks.
+    @MainActor
     private final class UpdateTaskContext {
         private var tasks = [UpdateFlag: Task<Void, any Error>]()
 
@@ -35,11 +36,12 @@ final class MenuBarOverlayPanel: NSPanel {
         ///
         /// - Parameters:
         ///   - flag: The update flag to set the task for.
-        ///   - timeout: The timeout of the task.
         ///   - operation: The operation for the task to perform.
-        func setTask(for flag: UpdateFlag, timeout: Duration, operation: @escaping () async throws -> Void) {
+        func setTask(for flag: UpdateFlag, operation: @escaping @MainActor () async throws -> Void) {
             cancelTask(for: flag)
-            tasks[flag] = Task.detached(timeout: timeout) {
+            // NSPanel, NSScreen and the published drawing state belong to the
+            // main actor. The operation uses a finite, cancellation-aware schedule.
+            tasks[flag] = Task { @MainActor in
                 try await operation()
             }
         }
@@ -49,6 +51,19 @@ final class MenuBarOverlayPanel: NSPanel {
         /// - Parameter flag: The update flag to cancel the task for.
         func cancelTask(for flag: UpdateFlag) {
             tasks.removeValue(forKey: flag)?.cancel()
+        }
+
+        func cancelAll() {
+            for task in tasks.values {
+                task.cancel()
+            }
+            tasks.removeAll()
+        }
+
+        deinit {
+            for task in tasks.values {
+                task.cancel()
+            }
         }
     }
 
@@ -70,8 +85,22 @@ final class MenuBarOverlayPanel: NSPanel {
     /// Storage for internal observers.
     private var cancellables = Set<AnyCancellable>()
 
+    private var periodicCancellables = Set<AnyCancellable>()
+
     /// The context that manages panel update tasks.
     private let updateTaskContext = UpdateTaskContext()
+
+    /// One pending drain coalesces flags without losing updates to a later task.
+    private var updateDrainTask: Task<Void, Never>?
+
+    private var updatePolicy: MenuBarAppearanceUpdatePolicy
+    private var isTornDown = false
+    private var menuFrameReadCount = 0
+    private var wallpaperCaptureCount = 0
+    private var validationSkipCount = 0
+    private var menuFrameReadNanoseconds: UInt64 = 0
+    private var wallpaperCaptureNanoseconds: UInt64 = 0
+    private var lastPerformanceLog = ContinuousClock.now
 
     /// The shared app state.
     private(set) weak var appState: AppState?
@@ -80,9 +109,10 @@ final class MenuBarOverlayPanel: NSPanel {
     let owningScreen: NSScreen
 
     /// Creates an overlay panel with the given app state and owning screen.
-    init(appState: AppState, owningScreen: NSScreen) {
+    init(appState: AppState, owningScreen: NSScreen, updatePolicy: MenuBarAppearanceUpdatePolicy) {
         self.appState = appState
         self.owningScreen = owningScreen
+        self.updatePolicy = updatePolicy
         super.init(
             contentRect: .zero,
             styleMask: [.borderless, .fullSizeContentView, .nonactivatingPanel],
@@ -124,13 +154,7 @@ final class MenuBarOverlayPanel: NSPanel {
                 guard let self else {
                     return
                 }
-                updateTaskContext.setTask(for: .desktopWallpaper, timeout: .seconds(5)) {
-                    while true {
-                        try Task.checkCancellation()
-                        self.insertUpdateFlag(.desktopWallpaper)
-                        try await Task.sleep(for: .seconds(1))
-                    }
-                }
+                scheduleRefreshes(for: .desktopWallpaper, delays: MenuBarAppearanceUpdatePolicy.wallpaperRefreshDelays)
             }
             .store(in: &c)
 
@@ -144,35 +168,12 @@ final class MenuBarOverlayPanel: NSPanel {
                 .compactMap { $0 == $1 ? nil : $0 }
         )
         .removeDuplicates()
+        .receive(on: DispatchQueue.main)
         .sink { [weak self] _ in
             guard let self else {
                 return
             }
-            updateTaskContext.setTask(for: .applicationMenuFrame, timeout: .seconds(10)) {
-                var hasDoneInitialUpdate = false
-                while true {
-                    try Task.checkCancellation()
-                    guard
-                        let latestFrame = self.owningScreen.getApplicationMenuFrame(),
-                        latestFrame != self.applicationMenuFrame
-                    else {
-                        if hasDoneInitialUpdate {
-                            try await Task.sleep(for: .seconds(1))
-                        } else {
-                            try await Task.sleep(for: .milliseconds(1))
-                        }
-                        continue
-                    }
-                    self.insertUpdateFlag(.applicationMenuFrame)
-                    hasDoneInitialUpdate = true
-                }
-            }
-            Task {
-                try? await Task.sleep(for: .milliseconds(100))
-                if self.owningScreen != NSScreen.main {
-                    self.updateTaskContext.cancelTask(for: .applicationMenuFrame)
-                }
-            }
+            scheduleRefreshes(for: .applicationMenuFrame, delays: MenuBarAppearanceUpdatePolicy.applicationMenuRefreshDelays)
         }
         .store(in: &c)
 
@@ -191,22 +192,6 @@ final class MenuBarOverlayPanel: NSPanel {
         }
         .store(in: &c)
 
-        // Continually update the desktop wallpaper. Ideally, we would set up an observer
-        // for a wallpaper change notification, but macOS doesn't post one anymore.
-        Timer.publish(every: 5, on: .main, in: .default)
-            .autoconnect()
-            .sink { [weak self] _ in
-                self?.insertUpdateFlag(.desktopWallpaper)
-            }
-            .store(in: &c)
-
-        Timer.publish(every: 10, on: .main, in: .default)
-            .autoconnect()
-            .sink { [weak self] _ in
-                self?.insertUpdateFlag(.applicationMenuFrame)
-            }
-            .store(in: &c)
-
         $needsShow
             .debounce(for: 0.05, scheduler: DispatchQueue.main)
             .sink { [weak self] needsShow in
@@ -220,36 +205,138 @@ final class MenuBarOverlayPanel: NSPanel {
             }
             .store(in: &c)
 
-        $updateFlags
-            .sink { [weak self] flags in
-                guard let self, !flags.isEmpty else {
-                    return
-                }
-                Task {
-                    // Must be run async, or this will not remove the flags.
-                    self.updateFlags.removeAll()
-                }
-                let windows = WindowInfo.createWindows(option: .onScreen)
-                if validate(for: .updates, with: windows) {
-                    performUpdates(for: flags, windows: windows, screen: owningScreen)
-                }
-            }
-            .store(in: &c)
-
         if let appState {
             appState.menuBarManager.$isMenuBarHiddenBySystem
+                .removeDuplicates()
+                .receive(on: DispatchQueue.main)
                 .sink { [weak self] isHidden in
-                    self?.alphaValue = isHidden ? 0 : 1
+                    guard let self, !isTornDown else { return }
+                    alphaValue = isHidden ? 0 : 1
+                    if !isHidden {
+                        insertUpdateFlag(.applicationMenuFrame)
+                        insertUpdateFlag(.desktopWallpaper)
+                    }
                 }
                 .store(in: &c)
         }
 
         cancellables = c
+        configurePeriodicUpdates()
+    }
+
+    private func configurePeriodicUpdates() {
+        periodicCancellables.removeAll()
+        guard !isTornDown else { return }
+        // macOS has no reliable wallpaper-change notification. Keep the fallback
+        // timer only for a drawing path that uses wallpaper, with coalescing leeway.
+        if updatePolicy.needsDesktopWallpaper {
+            Timer.publish(every: 5, tolerance: 1, on: .main, in: .default)
+                .autoconnect()
+                .sink { [weak self] _ in self?.insertUpdateFlag(.desktopWallpaper) }
+                .store(in: &periodicCancellables)
+        }
+        if updatePolicy.needsApplicationMenuFrame {
+            Timer.publish(every: 10, tolerance: 2, on: .main, in: .default)
+                .autoconnect()
+                .sink { [weak self] _ in self?.insertUpdateFlag(.applicationMenuFrame) }
+                .store(in: &periodicCancellables)
+        }
     }
 
     /// Inserts the given update flag into the panel's current list of update flags.
     private func insertUpdateFlag(_ flag: UpdateFlag) {
+        guard shouldUpdate(flag) else { return }
         updateFlags.insert(flag)
+        guard updateDrainTask == nil else { return }
+        updateDrainTask = Task { @MainActor [weak self] in
+            guard !Task.isCancelled, let self, !isTornDown else { return }
+            defer { updateDrainTask = nil }
+            let flags = updateFlags
+            updateFlags.removeAll()
+            let effectiveFlags = flags.filter { self.shouldUpdate($0) }
+            guard !effectiveFlags.isEmpty else { return }
+            let windows = WindowInfo.createWindows(option: .onScreen)
+            if validate(for: .updates, with: windows) {
+                performUpdates(for: effectiveFlags, windows: windows, screen: owningScreen)
+            } else {
+                validationSkipCount += 1
+            }
+            logPerformanceIfNeeded()
+        }
+    }
+
+    private func shouldUpdate(_ flag: UpdateFlag) -> Bool {
+        guard !isTornDown, isVisible, let appState else { return false }
+        guard !appState.activeSpace.isFullscreen,
+              !appState.menuBarManager.isMenuBarHiddenBySystemUserDefaults,
+              !appState.menuBarManager.isMenuBarHiddenBySystem else { return false }
+        switch flag {
+        case .applicationMenuFrame: return updatePolicy.needsApplicationMenuFrame
+        case .desktopWallpaper: return updatePolicy.needsDesktopWallpaper
+        }
+    }
+
+    private func scheduleRefreshes(for flag: UpdateFlag, delays: [Duration]) {
+        guard shouldUpdate(flag) else { return }
+        updateTaskContext.setTask(for: flag) { [weak self] in
+            try await MenuBarAppearanceUpdatePolicy.performRefreshes(delays: delays) { index in
+                guard let self, self.shouldUpdate(flag) else { return false }
+                // Keep the initial multi-display refresh; subsequent app-switch
+                // settling checks are only useful for the active menu bar's screen.
+                if flag == .applicationMenuFrame, index > 0, self.owningScreen != NSScreen.main {
+                    return false
+                }
+                self.insertUpdateFlag(flag)
+                return true
+            }
+        }
+    }
+
+    /// Reevaluate dependencies without replacing windows for every style edit.
+    func applyUpdatePolicy(_ policy: MenuBarAppearanceUpdatePolicy) {
+        guard !isTornDown else { return }
+        let previousPolicy = updatePolicy
+        updatePolicy = policy
+        if previousPolicy.needsApplicationMenuFrame != policy.needsApplicationMenuFrame ||
+            previousPolicy.needsDesktopWallpaper != policy.needsDesktopWallpaper {
+            logPerformanceIfNeeded(force: true)
+            AutomationDiagnosticLogger.shared.write(
+                "APPEARANCE_POLICY display=\(owningScreen.displayID) " +
+                "menuFrame=\(policy.needsApplicationMenuFrame) wallpaper=\(policy.needsDesktopWallpaper)"
+            )
+            configurePeriodicUpdates()
+        }
+        if !policy.needsApplicationMenuFrame {
+            updateTaskContext.cancelTask(for: .applicationMenuFrame)
+            updateFlags.remove(.applicationMenuFrame)
+            applicationMenuFrame = nil
+        } else if !previousPolicy.needsApplicationMenuFrame {
+            insertUpdateFlag(.applicationMenuFrame)
+        }
+        if !policy.needsDesktopWallpaper {
+            updateTaskContext.cancelTask(for: .desktopWallpaper)
+            updateFlags.remove(.desktopWallpaper)
+            desktopWallpaper = nil
+        } else if !previousPolicy.needsDesktopWallpaper {
+            insertUpdateFlag(.desktopWallpaper)
+        }
+        contentView?.needsDisplay = true
+    }
+
+    private func logPerformanceIfNeeded(force: Bool = false) {
+        guard force || lastPerformanceLog.duration(to: .now) >= .seconds(60) else { return }
+        guard menuFrameReadCount + wallpaperCaptureCount + validationSkipCount > 0 else { return }
+        AutomationDiagnosticLogger.shared.write(
+            "APPEARANCE_PERF display=\(owningScreen.displayID) menuFrameReads=\(menuFrameReadCount) " +
+            "menuFrameMs=\(menuFrameReadNanoseconds / 1_000_000) wallpaperCaptures=\(wallpaperCaptureCount) " +
+            "wallpaperMs=\(wallpaperCaptureNanoseconds / 1_000_000) validationSkipped=\(validationSkipCount)"
+        )
+        menuFrameReadCount = 0
+        wallpaperCaptureCount = 0
+        validationSkipCount = 0
+        menuFrameReadNanoseconds = 0
+        wallpaperCaptureNanoseconds = 0
+        lastPerformanceLog = .now
     }
 
     /// Performs validation for the given validation kind. Returns the panel's
@@ -286,7 +373,13 @@ final class MenuBarOverlayPanel: NSPanel {
         else {
             return
         }
-        applicationMenuFrame = screen.getApplicationMenuFrame()
+        let started = DispatchTime.now().uptimeNanoseconds
+        defer { menuFrameReadNanoseconds += DispatchTime.now().uptimeNanoseconds - started }
+        menuFrameReadCount += 1
+        let frame = screen.getApplicationMenuFrame()
+        if applicationMenuFrame != frame {
+            applicationMenuFrame = frame
+        }
     }
 
     /// Stores the area of the desktop wallpaper that is under the menu bar
@@ -298,6 +391,9 @@ final class MenuBarOverlayPanel: NSPanel {
         else {
             return
         }
+        let started = DispatchTime.now().uptimeNanoseconds
+        defer { wallpaperCaptureNanoseconds += DispatchTime.now().uptimeNanoseconds - started }
+        wallpaperCaptureCount += 1
         let wallpaper = ScreenCapture.captureWindow(with: wallpaperWindow.windowID, screenBounds: menuBarWindow.bounds)
         if desktopWallpaper?.dataProvider?.data != wallpaper?.dataProvider?.data {
             desktopWallpaper = wallpaper
@@ -316,7 +412,7 @@ final class MenuBarOverlayPanel: NSPanel {
 
     /// Shows the panel.
     private func show() {
-        guard let appState else {
+        guard let appState, !isTornDown else {
             return
         }
 
@@ -346,7 +442,8 @@ final class MenuBarOverlayPanel: NSPanel {
         setFrame(newFrame, display: false)
         orderFrontRegardless()
 
-        updateFlags = [.applicationMenuFrame, .desktopWallpaper]
+        insertUpdateFlag(.applicationMenuFrame)
+        insertUpdateFlag(.desktopWallpaper)
 
         if !appState.menuBarManager.isMenuBarHiddenBySystem {
             animator().alphaValue = 1
@@ -355,6 +452,22 @@ final class MenuBarOverlayPanel: NSPanel {
 
     override func isAccessibilityElement() -> Bool {
         return false
+    }
+
+    override func close() {
+        guard !isTornDown else { return }
+        isTornDown = true
+        updateTaskContext.cancelAll()
+        updateDrainTask?.cancel()
+        updateDrainTask = nil
+        cancellables.removeAll()
+        periodicCancellables.removeAll()
+        updateFlags.removeAll()
+        logPerformanceIfNeeded(force: true)
+        desktopWallpaper = nil
+        applicationMenuFrame = nil
+        contentView = nil
+        super.close()
     }
 }
 
