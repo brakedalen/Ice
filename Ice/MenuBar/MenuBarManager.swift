@@ -139,7 +139,11 @@ final class MenuBarManager: ObservableObject {
                     !appState.hidEventManager.isMouseInsideMenuBar(appState: appState, screen: screen)
                 {
                     Task {
-                        try await Task.sleep(for: .seconds(0.1))
+                        do {
+                            try await Task.sleep(for: .seconds(0.1))
+                        } catch {
+                            return
+                        }
                         hiddenSection.hide()
                     }
                 }
@@ -253,6 +257,14 @@ final class MenuBarManager: ObservableObject {
             settingsWindow.isVisible,
             let screen = settingsWindow.screen
         else {
+            return
+        }
+
+        if #available(macOS 27.0, *) {
+            let info = MenuBarAverageColorInfo(color: IceBarColorManager.flatColor27(), source: .menuBarWindow)
+            if averageColorInfo != info {
+                averageColorInfo = info
+            }
             return
         }
 
@@ -376,7 +388,7 @@ final class MenuBarManager: ObservableObject {
                 alwaysHiddenSection.isEnabled
             {
                 if alwaysHiddenSection.controlItem.state == .hideSection,
-                   let index = items.firstIndex(matching: .alwaysHiddenControlItem)
+                    let index = items.firstIndex(matching: .alwaysHiddenControlItem)
                 {
                     let controlItem = items.remove(at: index)
                     items.trimPrefix { $0.bounds.maxX <= controlItem.bounds.minX }
@@ -406,6 +418,9 @@ final class MenuBarManager: ObservableObject {
     }
 
     private var applicationMenusMayBeHidden: Bool {
+        if #available(macOS 27.0, *) {
+            return false
+        }
         guard let appState else {
             return false
         }

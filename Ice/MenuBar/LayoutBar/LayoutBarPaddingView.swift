@@ -74,6 +74,21 @@ final class LayoutBarPaddingView: NSView {
             }
         }
 
+        if #available(macOS 27.0, *), let appState = container.appState {
+            // On macOS 27 the saved layout decides sections and macOS orders the items within
+            // one, so a drop only moves the item's application to this section.
+            guard
+                !draggingSource.item.isControlItem,
+                !draggingSource.item.tag.isIceSpacer,
+                let bundleID = draggingSource.item.sourceApplication?.bundleIdentifier,
+                bundleID != Bundle.main.bundleIdentifier
+            else {
+                return false
+            }
+            appState.itemManager.setLayoutSection27(MacOS27Section(container.section), for: bundleID)
+            return true
+        }
+
         if let index = arrangedViews.firstIndex(of: draggingSource) {
             if arrangedViews.count == 1 {
                 Task {
@@ -110,14 +125,16 @@ final class LayoutBarPaddingView: NSView {
             return
         }
         Task {
-            try await Task.sleep(for: .milliseconds(25))
             do {
+                try await Task.sleep(for: .milliseconds(25))
                 try await appState.itemManager.move(
                     item: item,
                     to: destination,
                     origin: .layoutEditor
                 )
                 appState.itemManager.removeTemporarilyShownItemFromCache(withWindowID: item.windowID)
+            } catch is CancellationError {
+                return
             } catch {
                 Logger.default.error("Error moving menu bar item: \(error, privacy: .public)")
                 let alert = NSAlert(error: error)

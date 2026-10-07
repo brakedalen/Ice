@@ -267,9 +267,11 @@ final class MenuBarOverlayPanel: NSPanel {
 
     private func shouldUpdate(_ flag: UpdateFlag) -> Bool {
         guard !isTornDown, isVisible, let appState else { return false }
-        guard !appState.activeSpace.isFullscreen,
-              !appState.menuBarManager.isMenuBarHiddenBySystemUserDefaults,
-              !appState.menuBarManager.isMenuBarHiddenBySystem else { return false }
+        guard
+            !appState.activeSpace.isFullscreen,
+            !appState.menuBarManager.isMenuBarHiddenBySystemUserDefaults,
+            !appState.menuBarManager.isMenuBarHiddenBySystem
+        else { return false }
         switch flag {
         case .applicationMenuFrame: return updatePolicy.needsApplicationMenuFrame
         case .desktopWallpaper: return updatePolicy.needsDesktopWallpaper

@@ -123,6 +123,7 @@ final class IceBarColorManager: ObservableObject {
     private func configurePeriodicCapture(isVisible: Bool) {
         periodicCapture?.cancel()
         periodicCapture = nil
+        if #available(macOS 27.0, *) { return }
         guard isVisible else { return }
         periodicCapture = Timer.publish(every: 5, tolerance: 1, on: .main, in: .default)
             .autoconnect()
@@ -141,6 +142,7 @@ final class IceBarColorManager: ObservableObject {
     }
 
     private func updateWindowImage(for screen: NSScreen) {
+        if #available(macOS 27.0, *) { return }
         let started = DispatchTime.now().uptimeNanoseconds
         defer {
             captureNanoseconds += DispatchTime.now().uptimeNanoseconds - started
@@ -178,6 +180,10 @@ final class IceBarColorManager: ObservableObject {
     }
 
     private func updateColorInfo(with frame: CGRect, screen: NSScreen) {
+        if #available(macOS 27.0, *) {
+            setColor27()
+            return
+        }
         guard let image = windowImage, windowImageDisplayID == screen.displayID else {
             return
         }
@@ -229,5 +235,25 @@ final class IceBarColorManager: ObservableObject {
         captureFailureCount = 0
         captureNanoseconds = 0
         lastPerformanceLog = .now
+    }
+
+    /// One flat colour for macOS 27, where the menu bar window cannot be captured.
+    ///
+    /// Item images are cut out of a capture of the bar, so a colour read off the bar
+    /// would only match the moment of that capture: when a dark window later sits under
+    /// the menu bar, or the Ice Bar opens on the other display, the panel and the items
+    /// disagree. A flat colour that follows the system appearance always agrees with the
+    /// glyphs, which the capture takes in that same appearance.
+    static func flatColor27() -> CGColor {
+        var color = NSColor.windowBackgroundColor
+        NSApp.effectiveAppearance.performAsCurrentDrawingAppearance {
+            color = NSColor.windowBackgroundColor.usingColorSpace(.sRGB) ?? color
+        }
+        return color.cgColor
+    }
+
+    /// Sets the flat macOS 27 colour.
+    func setColor27() {
+        colorInfo = MenuBarAverageColorInfo(color: Self.flatColor27(), source: .menuBarWindow)
     }
 }

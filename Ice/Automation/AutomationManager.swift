@@ -1023,6 +1023,11 @@ final class AutomationManager: ObservableObject {
             return
         }
 
+        if #available(macOS 27.0, *) {
+            enforceAppSections27(desired: desired, appState: appState)
+            return
+        }
+
         var failedMoves = 0
         var performedMoves = 0
 
@@ -1252,6 +1257,49 @@ final class AutomationManager: ObservableObject {
         } else {
             consecutiveFailedPasses = 0
         }
+    }
+
+    /// macOS 27 conceals applications, so rules and restored placements use
+    /// the saved sections instead of attempting to move nonexistent windows.
+    @available(macOS 27.0, *)
+    private func enforceAppSections27(desired: [String: MenuBarSection.Name], appState: AppState) {
+        let cache = appState.itemManager.itemCache
+        let items = cache.managedItems.filter {
+            $0.isMovable && $0.canBeHidden && !$0.tag.isIceSpacer &&
+            $0.sourceApplication?.bundleIdentifier != Bundle.main.bundleIdentifier
+        }
+        // Include ungoverned siblings as well. A rule must not hide another
+        // icon from the same app that the user deliberately left visible.
+        let sections = SectionLayout27.automationSections(items: items.compactMap { item in
+            guard
+                let bundleID = item.sourceApplication?.bundleIdentifier,
+                let key = item.tag.automationKey,
+                let section = cache.address(forWindowID: item.windowID)?.section
+            else {
+                return nil
+            }
+            return (bundleID, key, MacOS27Section(section))
+        }, desired: desired.mapValues(MacOS27Section.init))
+        for bundleID in sections.keys.sorted() {
+            guard let section = sections[bundleID] else { continue }
+            if appState.concealer27.section(for: bundleID) != section {
+                appState.concealer27.setSection(section, for: bundleID)
+                logInfo("APP_SECTION_ENFORCED bundleID=\(bundleID) section=\(section.rawValue)")
+            }
+        }
+        for item in items {
+            guard
+                let key = item.tag.automationKey,
+                desired[key] != nil,
+                let bundleID = item.sourceApplication?.bundleIdentifier,
+                sections[bundleID] != nil
+            else {
+                continue
+            }
+            pendingRestores.removeValue(forKey: key)
+            placementMemoryRestoreKeys.remove(key)
+        }
+        consecutiveFailedPasses = 0
     }
 
     /// Schedules a bounded retry of the enforcement pass. The desired

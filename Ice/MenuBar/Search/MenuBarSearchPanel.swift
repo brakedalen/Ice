@@ -402,15 +402,17 @@ private struct MenuBarSearchContentView: View {
     private func performAction(for item: MenuBarItem) {
         closePanel()
         Task {
-            try await Task.sleep(for: .milliseconds(25))
-            if Bridging.isWindowOnScreen(item.windowID) {
-                try await itemManager.click(item: item, with: .left, on: displayID)
-            } else {
-                await itemManager.temporarilyShow(
-                    item: item,
-                    clickingWith: .left,
-                    on: displayID
-                )
+            do {
+                try await Task.sleep(for: .milliseconds(25))
+                if Bridging.isWindowOnScreen(item.windowID) {
+                    try await itemManager.click(item: item, with: .left, on: displayID)
+                } else {
+                    await itemManager.temporarilyShow(item: item, clickingWith: .left, on: displayID)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                Logger.default.error("Error clicking search result: \(error, privacy: .public)")
             }
         }
     }

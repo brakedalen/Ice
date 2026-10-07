@@ -77,6 +77,12 @@ final class LayoutBarItemView: NSView {
             }
             return item.displayName
         }()
+        if #available(macOS 27.0, *) {
+            // Lets Scripts/macos27/verify-layout.sh find the item.
+            setAccessibilityElement(true)
+            setAccessibilityRole(.image)
+            setAccessibilityLabel(item.displayName)
+        }
         self.isEnabled = item.isMovable
 
         configureCancellables()

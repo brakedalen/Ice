@@ -1,5 +1,5 @@
 <div align="center">
-    <img src="Ice/Assets.xcassets/AppIcon.appiconset/icon_256x256.png" width=200 height=200>
+    <img src="Ice/Resources/Assets.xcassets/AppIcon.appiconset/icon_256x256.png" width=200 height=200>
     <h1>Ice</h1>
 </div>
 
@@ -36,6 +36,13 @@ brew install --cask jordanbaird-ice
 ```
 
 ## Features/Roadmap
+
+For local builds and testing of this fork on macOS 27 with Xcode 27, see
+[Testing Ice 0.12.0-brakedalen.17 on macOS 27](MACOS27.md).
+
+This build includes the `custom-build` changes through `0.12.0-brakedalen.16`.
+See [b17 merge and regression checks](docs/QA-b17.md) for the retained custom
+features and macOS 27 limitations.
 
 ### Menu bar item management
 

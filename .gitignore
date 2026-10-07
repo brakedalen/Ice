@@ -5,3 +5,5 @@ xcuserdata/
 # https://github.com/jordanbaird/Ice/pull/795
 DerivedData/
 
+.build/
+.swiftpm/

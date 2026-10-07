@@ -136,6 +136,24 @@ final class MenuBarItemManager: ObservableObject {
             }
             .store(in: &c)
 
+        if #available(macOS 27.0, *) {
+            // Accessibility reports frames only for the active menu bar, so read the
+            // items again soon after it moves to another display.
+            NSWorkspace.shared.notificationCenter
+                .publisher(for: NSWorkspace.didActivateApplicationNotification)
+                // The menu bar takes about a second to move (measured).
+                .debounce(for: 1.5, scheduler: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    guard let self else {
+                        return
+                    }
+                    Task {
+                        await self.cacheItemsIfNeeded()
+                    }
+                }
+                .store(in: &c)
+        }
+
         cancellables = c
     }
 
@@ -393,7 +411,7 @@ extension MenuBarItemManager {
 
         for item in items where context.isValidForCaching(item) {
             if let retiredOwner = retiredTemporaryWindows[item.windowID],
-               retiredOwner.matches(sourcePID: item.sourcePID, windowOwnerPID: item.ownerPID) {
+                retiredOwner.matches(sourcePID: item.sourcePID, windowOwnerPID: item.ownerPID) {
                 continue
             }
             if item.sourcePID == nil {
@@ -519,6 +537,28 @@ extension MenuBarItemManager {
                 )
             }
 
+            if #available(macOS 27.0, *), let appState {
+                // On macOS 27 the saved layout, not the order on the bar, places items in sections,
+                // so Ice's dividers are not needed. Accessibility reports them only on the display
+                // Ice launched on, and requiring them emptied the cache on the other display.
+                // An upgrade from an earlier macOS arrives with its sections in the bar's order and
+                // nowhere else, so the first readable bar is where they come from.
+                appState.concealer27.seedLayoutIfNeeded(items: items)
+                let cache = appState.concealer27.cacheFromSavedLayout(items: items, displayID: displayID)
+                if itemCache != cache {
+                    itemCache = cache
+                    logger.info(
+                        """
+                        macOS 27 cache: \
+                        visible=\(cache[.visible].map(\.tag.namespace.description).joined(separator: ","), privacy: .public) \
+                        hidden=\(cache[.hidden].map(\.tag.namespace.description).joined(separator: ","), privacy: .public) \
+                        alwaysHidden=\(cache[.alwaysHidden].map(\.tag.namespace.description).joined(separator: ","), privacy: .public)
+                        """
+                    )
+                }
+                return
+            }
+
             guard let controlItems = ControlItemPair(items: &items) else {
                 // ???: Is clearing the cache the best thing to do here?
                 logger.warning("Missing control item for hidden section, clearing menu bar item cache")
@@ -526,7 +566,11 @@ extension MenuBarItemManager {
                 return
             }
 
-            await enforceControlItemOrder(controlItems: controlItems)
+            // Moving items is not supported on macOS 27 yet (plan 2), so the dividers
+            // stay where macOS placed them.
+            if #unavailable(macOS 27.0) {
+                await enforceControlItemOrder(controlItems: controlItems)
+            }
             await uncheckedCacheItems(items: items, controlItems: controlItems, displayID: displayID)
         }
     }
@@ -541,6 +585,16 @@ extension MenuBarItemManager {
         // This existing slow check also catches a missed termination notice,
         // including when every pending rehide interaction is suspended.
         pruneTemporaryContexts()
+        if #available(macOS 27.0, *) {
+            // There is no item window list on macOS 27. A reorder keeps the synthetic
+            // identifiers, so the signature also carries each item's position.
+            let items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+            let signature = items.map { $0.windowID &+ UInt32(truncatingIfNeeded: Int($0.bounds.minX)) }
+            if await cacheActor.cachedItemWindowIDs != signature {
+                await cacheItemsRegardless(signature)
+            }
+            return
+        }
         let itemWindowIDs = Bridging.getMenuBarWindowList(option: [.itemsOnly, .activeSpace])
         if await cacheActor.cachedItemWindowIDs != itemWindowIDs {
             await cacheItemsRegardless(itemWindowIDs)
@@ -1174,10 +1228,10 @@ extension MenuBarItemManager {
             }
 
             if let previous = stableBounds,
-               abs(previous.minX - bounds.minX) <= 1,
-               abs(previous.minY - bounds.minY) <= 1,
-               abs(previous.width - bounds.width) <= 1,
-               abs(previous.height - bounds.height) <= 1 {
+                abs(previous.minX - bounds.minX) <= 1,
+                abs(previous.minY - bounds.minY) <= 1,
+                abs(previous.width - bounds.width) <= 1,
+                abs(previous.height - bounds.height) <= 1 {
                 if let stableSince, stableSince.duration(to: clock.now) >= .milliseconds(200) {
                     return bounds
                 }
@@ -1597,6 +1651,16 @@ extension MenuBarItemManager {
             throw error
         }
         try request.checkValidity()
+    }
+
+    /// Changes the macOS 27 layout while invalidating older automation intent,
+    /// just as a manual window move does on earlier systems.
+    @available(macOS 27.0, *)
+    func setLayoutSection27(_ section: MacOS27Section, for bundleID: String) {
+        guard let appState, appState.concealer27.section(for: bundleID) != section else { return }
+        layoutEditorMoveGeneration &+= 1
+        appState.concealer27.setSection(section, for: bundleID)
+        appState.automationManager.resumeAfterLayoutEditorMove()
     }
 
     /// Moves a menu bar item to the given destination.
@@ -2111,10 +2175,10 @@ extension MenuBarItemManager {
             }
 
             if let previous = stableBounds,
-               abs(previous.minX - bounds.minX) <= 1,
-               abs(previous.minY - bounds.minY) <= 1,
-               abs(previous.width - bounds.width) <= 1,
-               abs(previous.height - bounds.height) <= 1 {
+                abs(previous.minX - bounds.minX) <= 1,
+                abs(previous.minY - bounds.minY) <= 1,
+                abs(previous.width - bounds.width) <= 1,
+                abs(previous.height - bounds.height) <= 1 {
                 if let stableSince, stableSince.duration(to: clock.now) >= .milliseconds(200) {
                     return bounds
                 }
@@ -2451,6 +2515,11 @@ extension MenuBarItemManager {
     ) async throws {
         guard let appState else {
             throw EventError.cannotComplete
+        }
+
+        if #available(macOS 27.0, *) {
+            await ItemClicker27.click(item: item, mouseButton: mouseButton, iceBarDisplayID: displayID, appState: appState)
+            return
         }
 
         if await activateOneDriveWithAccessibilityIfPossible(
@@ -2810,8 +2879,8 @@ extension MenuBarItemManager {
         let targetIsSectionControl = context.returnDestination.targetItem.tag.isControlItem
 
         if !targetIsTemporary,
-           targetIsInOriginalSection || targetIsSectionControl,
-           let destination = resolveCurrentDestination(context.returnDestination, in: items) {
+            targetIsInOriginalSection || targetIsSectionControl,
+            let destination = resolveCurrentDestination(context.returnDestination, in: items) {
             return (destination, false)
         }
 
@@ -2832,8 +2901,10 @@ extension MenuBarItemManager {
     /// Schedules a timer for the given interval that rehides the
     /// temporarily shown items when fired.
     private func runRehideTimer(for interval: TimeInterval? = nil) {
-        guard let appState,
-              temporarilyShownItemContexts.contains(where: { !$0.rehideRetry.isSuspended }) else {
+        guard
+            let appState,
+            temporarilyShownItemContexts.contains(where: { !$0.rehideRetry.isSuspended })
+        else {
             rehideTimer?.invalidate()
             rehideTimer = nil
             return
@@ -2890,6 +2961,11 @@ extension MenuBarItemManager {
     ) async {
         guard let appState else {
             logger.error("Missing AppState, so not showing \(item.logString, privacy: .public)")
+            return
+        }
+
+        if #available(macOS 27.0, *) {
+            await ItemClicker27.click(item: item, mouseButton: mouseButton, iceBarDisplayID: displayID, appState: appState)
             return
         }
 

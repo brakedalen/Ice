@@ -164,6 +164,7 @@ final class IceBarPanel: NSPanel {
     /// Shows the panel on the given screen, displaying the given
     /// menu bar section.
     func show(section: MenuBarSection.Name, on screen: NSScreen) async {
+        let requestedAt = ContinuousClock.now
         guard let appState else {
             return
         }
@@ -220,8 +221,16 @@ final class IceBarPanel: NSPanel {
         // the main queue, so we need to update manually once before showing
         // the panel to prevent the color from flashing.
         colorManager.updateAllProperties(with: frame, screen: screen)
+        if #available(macOS 27.0, *) {
+            colorManager.setColor27()
+        }
 
         orderFrontRegardless()
+        if #available(macOS 27.0, *) {
+            let elapsed = (ContinuousClock.now - requestedAt).components
+            let milliseconds = Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15
+            Logger.default.notice("Ice Bar shown \(milliseconds, privacy: .public) ms after it was requested")
+        }
     }
 
     /// Hides the panel.
@@ -436,42 +445,35 @@ private struct IceBarItemView: View {
     let displayID: CGDirectDisplayID
 
     private var leftClickAction: () -> Void {
-        return { [weak itemManager, weak menuBarManager] in
-            guard let itemManager, let menuBarManager else {
-                return
-            }
-            menuBarManager.section(withName: section)?.hide()
-            Task {
-                try await Task.sleep(for: .milliseconds(25))
-                if Bridging.isWindowOnScreen(item.windowID) {
-                    try await itemManager.click(item: item, with: .left, on: displayID)
-                } else {
-                    await itemManager.temporarilyShow(
-                        item: item,
-                        clickingWith: .left,
-                        on: displayID
-                    )
-                }
-            }
-        }
+        clickAction(with: .left)
     }
 
     private var rightClickAction: () -> Void {
+        clickAction(with: .right)
+    }
+
+    private func clickAction(with mouseButton: CGMouseButton) -> () -> Void {
         return { [weak itemManager, weak menuBarManager] in
             guard let itemManager, let menuBarManager else {
                 return
             }
             menuBarManager.section(withName: section)?.hide()
             Task {
-                try await Task.sleep(for: .milliseconds(25))
-                if Bridging.isWindowOnScreen(item.windowID) {
-                    try await itemManager.click(item: item, with: .right, on: displayID)
-                } else {
-                    await itemManager.temporarilyShow(
-                        item: item,
-                        clickingWith: .right,
-                        on: displayID
-                    )
+                do {
+                    try await Task.sleep(for: .milliseconds(25))
+                    if #available(macOS 27.0, *), let appState = itemManager.appState {
+                        await ItemClicker27.click(item: item, mouseButton: mouseButton, iceBarDisplayID: displayID, appState: appState)
+                        return
+                    }
+                    if Bridging.isWindowOnScreen(item.windowID) {
+                        try await itemManager.click(item: item, with: mouseButton, on: displayID)
+                    } else {
+                        await itemManager.temporarilyShow(item: item, clickingWith: mouseButton, on: displayID)
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    Logger.default.error("Error clicking Ice Bar item: \(error, privacy: .public)")
                 }
             }
         }

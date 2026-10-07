@@ -163,10 +163,30 @@ final class MenuBarItemImageCache: ObservableObject {
 
         guard
             let compositeImage = ScreenCapture.captureWindows(with: windowIDs, option: captureOption),
-            CGFloat(compositeImage.width) == boundsUnion.width * scale, // Safety check.
-            !compositeImage.isTransparent()
+            !compositeImage.isTransparent(),
+            boundsUnion.width > 0
         else {
             result.excluded = items // Exclude all items.
+            return result
+        }
+
+        // Derive the scale from the capture rather than trusting the one passed in.
+        //
+        // The caller's scale comes from whichever display the item cache last
+        // recorded, and that briefly disagrees with reality when the active menu
+        // bar moves between displays of different densities: the pixels are the
+        // new display's, the recorded scale is still the old one's.
+        //
+        // This used to be an exact equality check — `compositeImage.width ==
+        // boundsUnion.width * scale` — which failed on that disagreement and
+        // excluded *every* item, sending them all into the individual capture path
+        // that blocks. So the same mismatch produced both symptoms: items drawn at
+        // twice or half their size, and the freeze. Deriving the scale removes the
+        // disagreement instead of detecting it.
+        let actualScale = CGFloat(compositeImage.width) / boundsUnion.width
+        guard actualScale >= 0.5, actualScale <= 4 else {
+            logger.warning("Implausible capture scale \(actualScale, privacy: .public); excluding items")
+            result.excluded = items
             return result
         }
 
@@ -178,10 +198,10 @@ final class MenuBarItemImageCache: ObservableObject {
             }
 
             let cropRect = CGRect(
-                x: (bounds.origin.x - boundsUnion.origin.x) * scale,
-                y: (bounds.origin.y - boundsUnion.origin.y) * scale,
-                width: bounds.width * scale,
-                height: bounds.height * scale
+                x: (bounds.origin.x - boundsUnion.origin.x) * actualScale,
+                y: (bounds.origin.y - boundsUnion.origin.y) * actualScale,
+                width: bounds.width * actualScale,
+                height: bounds.height * actualScale
             )
 
             guard
@@ -192,7 +212,7 @@ final class MenuBarItemImageCache: ObservableObject {
                 continue
             }
 
-            result.images[item.windowID] = CapturedImage(cgImage: image, scale: scale)
+            result.images[item.windowID] = CapturedImage(cgImage: image, scale: actualScale)
         }
 
         return result
@@ -205,14 +225,23 @@ final class MenuBarItemImageCache: ObservableObject {
 
         for item in items {
             try Task.checkCancellation()
+            // Live bounds, not `item.bounds`: the cached ones can name the display
+            // the item was on a moment ago.
             guard
+                let bounds = Bridging.getWindowBounds(for: item.windowID),
+                bounds.width > 0,
                 let image = ScreenCapture.captureWindow(with: item.windowID, option: captureOption),
                 !image.isTransparent()
             else {
                 result.excluded.append(item)
                 continue
             }
-            result.images[item.windowID] = CapturedImage(cgImage: image, scale: scale)
+            // Derived, for the same reason as in the composite path above.
+            let actualScale = CGFloat(image.width) / bounds.width
+            result.images[item.windowID] = CapturedImage(
+                cgImage: image,
+                scale: (actualScale >= 0.5 && actualScale <= 4) ? actualScale : scale
+            )
         }
 
         return result
@@ -342,6 +371,26 @@ final class MenuBarItemImageCache: ObservableObject {
 
         // Take one coherent layout/display snapshot before the first suspension.
         let itemSnapshot = appState.itemManager.itemCache
+        if #available(macOS 27.0, *) {
+            let items = sections.flatMap { itemSnapshot.managedItems(for: $0) }.filter { !$0.tag.isIceSpacer }
+            let store = appState.itemImageStore27
+            await store.captureActiveMenuBar(appState: appState)
+            guard !Task.isCancelled, captureCoordinator.generation == generation else { return }
+            await store.photographMissing(items: items, appState: appState)
+            guard !Task.isCancelled, captureCoordinator.generation == generation else { return }
+            var newImages = [CGWindowID: CapturedImage]()
+            for item in items {
+                if let image = store.image(for: item) {
+                    newImages[item.windowID] = image
+                }
+            }
+            let validIDs = Set(itemSnapshot.managedItems.map(\.windowID))
+            var updatedImages = images.filter { validIDs.contains($0.key) }
+            updatedImages.merge(newImages) { (_, new) in new }
+            images = updatedImages
+            return
+        }
+
         guard
             let displayID = itemSnapshot.displayID,
             let screen = NSScreen.screens.first(where: { $0.displayID == displayID })
