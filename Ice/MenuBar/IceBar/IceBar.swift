@@ -428,28 +428,14 @@ private struct IceBarItemView: View {
     let section: MenuBarSection.Name
 
     private var leftClickAction: () -> Void {
-        return { [weak itemManager, weak menuBarManager] in
-            guard let itemManager, let menuBarManager else {
-                return
-            }
-            let iceBarDisplayID = menuBarManager.iceBarPanel.screen?.displayID
-            menuBarManager.section(withName: section)?.hide()
-            Task {
-                try await Task.sleep(for: .milliseconds(25))
-                if #available(macOS 27.0, *), let appState = itemManager.appState {
-                    await ItemClicker27.click(item: item, mouseButton: .left, iceBarDisplayID: iceBarDisplayID, appState: appState)
-                    return
-                }
-                if Bridging.isWindowOnScreen(item.windowID) {
-                    try await itemManager.click(item: item, with: .left)
-                } else {
-                    await itemManager.temporarilyShow(item: item, clickingWith: .left)
-                }
-            }
-        }
+        clickAction(with: .left)
     }
 
     private var rightClickAction: () -> Void {
+        clickAction(with: .right)
+    }
+
+    private func clickAction(with mouseButton: CGMouseButton) -> () -> Void {
         return { [weak itemManager, weak menuBarManager] in
             guard let itemManager, let menuBarManager else {
                 return
@@ -457,15 +443,21 @@ private struct IceBarItemView: View {
             let iceBarDisplayID = menuBarManager.iceBarPanel.screen?.displayID
             menuBarManager.section(withName: section)?.hide()
             Task {
-                try await Task.sleep(for: .milliseconds(25))
-                if #available(macOS 27.0, *), let appState = itemManager.appState {
-                    await ItemClicker27.click(item: item, mouseButton: .right, iceBarDisplayID: iceBarDisplayID, appState: appState)
+                do {
+                    try await Task.sleep(for: .milliseconds(25))
+                    if #available(macOS 27.0, *), let appState = itemManager.appState {
+                        await ItemClicker27.click(item: item, mouseButton: mouseButton, iceBarDisplayID: iceBarDisplayID, appState: appState)
+                        return
+                    }
+                    if Bridging.isWindowOnScreen(item.windowID) {
+                        try await itemManager.click(item: item, with: mouseButton)
+                    } else {
+                        await itemManager.temporarilyShow(item: item, clickingWith: mouseButton)
+                    }
+                } catch is CancellationError {
                     return
-                }
-                if Bridging.isWindowOnScreen(item.windowID) {
-                    try await itemManager.click(item: item, with: .right)
-                } else {
-                    await itemManager.temporarilyShow(item: item, clickingWith: .right)
+                } catch {
+                    Logger.default.error("Error clicking Ice Bar item: \(error, privacy: .public)")
                 }
             }
         }

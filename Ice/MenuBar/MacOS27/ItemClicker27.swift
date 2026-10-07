@@ -4,7 +4,7 @@
 //
 
 import AppKit
-import ApplicationServices
+@preconcurrency import ApplicationServices
 import OSLog
 
 /// Opens a hidden item's menu from the Ice Bar on macOS 27.

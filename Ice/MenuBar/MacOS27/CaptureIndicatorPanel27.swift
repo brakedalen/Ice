@@ -3,6 +3,7 @@
 //  Ice
 //
 
+@preconcurrency import ApplicationServices
 import Cocoa
 import Combine
 import OSLog
@@ -33,7 +34,7 @@ final class CaptureIndicatorPanel27: NSPanel {
     /// How much room is left between it and the items beside it.
     private static let gap: CGFloat = 6
 
-    private static let frameLock = NSLock()
+    private nonisolated static let frameLock = NSLock()
     nonisolated(unsafe) private static var shownFrame: CGRect?
 
     /// Where the indicator is drawn right now, for the hit tests that decide whether the pointer
