@@ -2,11 +2,14 @@
 
 ## Versjonsgrunnlag
 
-- Installert app og undersøkt logg: **b16 / 1154**, commit `df3b563`.
+- Første undersøkte logg og daværende app: **b16 / 1154**, commit `df3b563`.
+- Oppfølgingsloggen kl. 17:43 kom fra vanlig **b17 / 1155**, uten rettingene.
 - Feilrettingsbranch: `codex/fix-layout-move-reveal`, fra **b17 / 1155**,
   commit `7fa4a38`. macOS 27-integrasjonen fra main beholdes.
 - Maskin: macOS **26.7.1**, Apple Silicon. Kontrollverktøy: Xcode **27.0**.
-- Appen i `/Applications` er ikke erstattet eller startet fra feilrettingsbranchen.
+- Appen i `/Applications` er nå bygget fra feilrettingsrevisjon **`7e5907e`**,
+  signert med samme Apple Development-identitet og startet kl. 18:04 Oslo-tid.
+  Versjonsnummeret er fortsatt b17 / 1155; loggmarkøren identifiserer rettingen.
 
 ## Bekreftet feilsted og begrensning i diagnosen
 
@@ -52,7 +55,8 @@ Fiksen skal ikke omgå denne sikkerhetsgrensen.
 - Ved preflight-feil logges aktuell geometri, on-screen-status, skjermtreff og
   seksjonstilstander. Ingen ekstra polling eller nye private API-er innføres.
 - Kravet om et stabilt, faktisk synlig mål og sikre koordinater før mouse-up
-  er beholdt. `MenuBarMoveSafety` og selve drahendelsene er uendret.
+  er beholdt. Selve drahendelsene er uendret. Etterkontrollen er rettet som
+  beskrevet i oppfølgingsfunnene nedenfor.
 
 ## Nettgrunnlag og macOS 27
 
@@ -80,31 +84,45 @@ allerede er funksjonstestet på begge operativsystemene.
 
 ## Utført verifikasjon, 10. oktober 2026
 
-- **8 nye XCTest-tester bestått**, 0 feil. Faktisk produksjonsfil
-  `MenuBarLayoutMovePolicy.swift` ble kompilert som en isolert, testbar modul;
-  testfilen ble kjørt som en selvstendig XCTest-bundle uten AppState/statusikoner.
-  Dette er ikke hele appens testpakke.
+- **15 nye XCTest-tester bestått**, 0 feil, lokalt som isolert XCTest-bundle
+  mot de faktiske produksjonsfilene for flyttesikkerhet og reveal-policy.
 - **134 tester i 25 suiter bestått** i `IceMacOS27Core`, kompilert med macOS 27
   SDK og kjørt på macOS 26.7.1. Etter CoreGraphics-importen bygger pakken på Mac.
 - Swift-parseren: alle endrede Swift-kilder bestått.
 - SwiftLint 0.65.1, `--strict --no-cache`: **0 avvik** i endrede produksjonsfiler.
   Testfilen følger eksisterende IceTests-headerkonvensjon.
 - `git diff --check`: bestått.
-- **Full appbygging og de eksisterende 59 app-testene er ikke kjørt ferdig.**
-  `xcodebuild` stopper med exit 69 fordi Xcode-lisensen ikke er godkjent.
-  Full kontroll må kjøres etter at brukeren har godkjent lisensen i Xcode.
+- **Hele appens 74 tester bestått**, 0 feil, på **macOS 26.6.2 / Xcode 26.6**
+  og **macOS 27.0.1 / Xcode 27.0** i GitHub Actions. Begge kjørte også
+  **134 kjernetester** og bygget en universell Release-app for arm64/x86_64.
+  [Verifisert kjøring for `7e5907e`](https://github.com/brakedalen/Ice/actions/runs/38065782552)
+- Lokal `xcodebuild` var blokkert av manglende lisensgodkjenning. Byggingen
+  ovenfor ble derfor utført på GitHubs Mac-maskiner. Ingen lokal lisens ble
+  godtatt av agenten.
+- Release-appen fra SDK 27-bygget er signert lokalt med eksisterende sertifikat,
+  samme bundle-ID, team-ID og designated requirement som dagens installasjon.
+  Hardened runtime er beholdt; innlastet Sparkle og Ice-hjelpetjenesten er
+  signert med samme team. `codesign --verify --deep --strict` består både før
+  og etter installasjon. Oppstart og eksisterende tillatelser er kontrollert.
 - Ingen vellykket manuell flytting med det nye bygget er bekreftet.
-- Ingen kjøring på en faktisk macOS 27-maskin er utført.
+  UI-verktøyets prøvedraing utløste ikke `MOVE_START`, og er derfor ikke
+  regnet som en funksjonstest av flyttekoden. Brukeren er bedt om å gjøre
+  et nytt forsøk i det installerte bygget for kontroll mot loggen.
+- Interaktiv seksjonsflytting på macOS 27 er ikke kontrollert. CI kjørte appens
+  inerte Debug-testvert på macOS 27, uten å opprette reelle menylinjeikoner.
 
 Midlertidige kontrollartefakter ligger i `/private/tmp/`:
 `ice-layout-policy-tests.log`, `ice-layout-fix-spm-tests.log`,
 `ice-layout-fix-lint.log` og `ice-layout-fix-tests.log`.
 
+Det installerte bygget, testlogger og tidligere app er bevart i
+`build/layout-fix-7e5907e/` (git-ignorert). Forrige installasjon ligger i
+`previous/Ice.app`; full CI-logg ligger i `evidence/full-ci.log`.
+
 ## Gjenstående godkjenningskontroll
 
-1. Kjør Debug-testhandlingen med `ICE_UNIT_TESTING=1`, isolert QA-bundle-ID
-   og separat DerivedData, slik [QA-b16.md](QA-b16.md) beskriver. Bygg Release
-   for arm64 og x86_64 uten installasjon.
+1. Debug-testhandlingen med `ICE_UNIT_TESTING=1`, isolert QA-bundle-ID og
+   separat DerivedData samt Release for arm64/x86_64 er fullført i CI.
 2. På macOS 26: prøv Visible → Hidden → Always-Hidden → Visible med et vanlig
    ikon og en spacer, med ingen skilletegn og chevron. Kontroller også en
    seksjon som opprinnelig var vist, begge hovertilstander og alle rehidevalg.
@@ -163,11 +181,11 @@ Swift-parseren og streng SwiftLint på de endrede produksjonsfilene bestod.
 Et bygg med begge rettingene logger `policy=native-bounds-v2` i
 `LAYOUT_MOVE_REVEAL_START`. Det gjør det mulig å kontrollere at den kjørende
 appen faktisk inneholder feilrettingene, selv om versjonsnummeret er b17.
-Full appbygging og manuell funksjonskontroll er fortsatt nødvendig.
+Full appbygging er nå fullført. Manuell funksjonskontroll av draingen gjenstår.
 
 En branch-avgrenset GitHub Actions-jobb bygger og tester både på `macos-26`
 og `xcode-27`. Den bruker den inerte Debug-testverten og lager en usignert
 universell Release-app med begge rettingene. Den krever ingen signeringsnøkler.
 macOS 27-runneren er beskrevet i
 [GitHubs offisielle runner-kunngjøring](https://github.com/actions/runner-images/issues/14404).
-Resultatene må leses før bygget kan regnes som verifisert.
+Begge jobbene er fullført og resultatene er lest; se verifikasjonen ovenfor.
