@@ -149,6 +149,7 @@ final class MenuBarSection {
 
     /// Shows the section.
     func show() {
+        guard appState?.itemManager.isLayoutEditorMoveActive != true else { return }
         guard let menuBarManager, isHidden else {
             return
         }
@@ -208,6 +209,8 @@ final class MenuBarSection {
 
     /// Hides the section.
     func hide() {
+        // Also rejects rehide tasks/timers queued before the layout drag.
+        guard appState?.itemManager.isLayoutEditorMoveActive != true else { return }
         guard let menuBarManager, !isHidden else {
             return
         }
@@ -240,6 +243,18 @@ final class MenuBarSection {
         }
     }
 
+    /// Pauses existing timers as well as the input monitor during a native move.
+    func pauseRehideForLayoutMove() {
+        stopRehideChecks()
+    }
+
+    /// Restarts timed rehide only for a section left visible by the transaction.
+    func resumeRehideAfterLayoutMove() {
+        if !isHidden {
+            startRehideChecks()
+        }
+    }
+
     /// Starts running checks to determine when to rehide the section.
     private func startRehideChecks() {
         rehideTimer?.invalidate()
@@ -253,6 +268,7 @@ final class MenuBarSection {
             return
         }
 
+        let layoutGeneration = appState.itemManager.layoutEditorMoveGeneration
         rehideMonitor = EventMonitor.universal(for: .mouseMoved) { [weak self] event in
             guard
                 let self,
@@ -274,10 +290,20 @@ final class MenuBarSection {
                         }
                         if NSEvent.mouseLocation.y < screen.visibleFrame.maxY {
                             Task {
+                                guard MenuBarLayoutMovePolicy.allowsDeferredSectionChange(
+                                    capturedGeneration: layoutGeneration,
+                                    currentGeneration: appState.itemManager.layoutEditorMoveGeneration,
+                                    isLayoutEditorMoveActive: appState.itemManager.isLayoutEditorMoveActive
+                                ) else { return }
                                 await self.hide()
                             }
                         } else {
                             Task {
+                                guard MenuBarLayoutMovePolicy.allowsDeferredSectionChange(
+                                    capturedGeneration: layoutGeneration,
+                                    currentGeneration: appState.itemManager.layoutEditorMoveGeneration,
+                                    isLayoutEditorMoveActive: appState.itemManager.isLayoutEditorMoveActive
+                                ) else { return }
                                 await self.startRehideChecks()
                             }
                         }

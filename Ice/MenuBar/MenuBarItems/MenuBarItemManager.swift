@@ -66,7 +66,7 @@ final class MenuBarItemManager: ObservableObject {
     /// Whether a user-initiated move from the layout editor currently owns
     /// the real menu bar geometry. Automation must not inspect or mutate item
     /// sections while all dividers are temporarily revealed.
-    private(set) var isLayoutEditorMoveActive = false
+    @Published private(set) var isLayoutEditorMoveActive = false
 
     /// Changes at both ends of every layout-editor move. Long-running
     /// automation passes use this to discard decisions made from an older
@@ -407,6 +407,7 @@ extension MenuBarItemManager {
         controlItems: ControlItemPair,
         displayID: CGDirectDisplayID?
     ) async {
+        let layoutGeneration = layoutEditorMoveGeneration
         var context = CacheContext(controlItems: controlItems, displayID: displayID)
 
         for item in items where context.isValidForCaching(item) {
@@ -482,6 +483,12 @@ extension MenuBarItemManager {
             await cacheActor.clearCachedItemWindowIDs() // Ensure next cache isn't skipped.
         }
 
+        guard MenuBarLayoutMovePolicy.allowsDeferredSectionChange(
+            capturedGeneration: layoutGeneration,
+            currentGeneration: layoutEditorMoveGeneration,
+            isLayoutEditorMoveActive: isLayoutEditorMoveActive
+        ) else { return }
+
         guard !itemCache.hasSamePublishedLayout(as: context.cache) else {
             logger.debug("Not updating menu bar item cache, as items haven't changed")
             return
@@ -504,6 +511,9 @@ extension MenuBarItemManager {
                 return
             }
 
+            let layoutGeneration = layoutEditorMoveGeneration
+            guard !isLayoutEditorMoveActive else { return }
+
             guard !lastMoveOperationOccurred(within: .seconds(1)) else {
                 logger.debug("Skipping menu bar item cache due to recent item movement")
                 return
@@ -511,6 +521,11 @@ extension MenuBarItemManager {
 
             let displayID = Bridging.getActiveMenuBarDisplayID()
             var items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+            guard MenuBarLayoutMovePolicy.allowsDeferredSectionChange(
+                capturedGeneration: layoutGeneration,
+                currentGeneration: layoutEditorMoveGeneration,
+                isLayoutEditorMoveActive: isLayoutEditorMoveActive
+            ) else { return }
 
             if !retiredTemporaryWindows.isEmpty {
                 let itemsByID = Dictionary(items.map { ($0.windowID, $0) }, uniquingKeysWith: { first, _ in first })
@@ -522,6 +537,14 @@ extension MenuBarItemManager {
 
             let itemWindowIDs = currentItemWindowIDs ?? items.reversed().map { $0.windowID }
             await cacheActor.updateCachedItemWindowIDs(itemWindowIDs)
+            guard MenuBarLayoutMovePolicy.allowsDeferredSectionChange(
+                capturedGeneration: layoutGeneration,
+                currentGeneration: layoutEditorMoveGeneration,
+                isLayoutEditorMoveActive: isLayoutEditorMoveActive
+            ) else {
+                await cacheActor.clearCachedItemWindowIDs()
+                return
+            }
 
             let liveTags = Set(items.map(\.tag))
             let removedUUIDs = MenuBarItemTag.Namespace.pruneUUIDCache(
@@ -570,6 +593,14 @@ extension MenuBarItemManager {
             // stay where macOS placed them.
             if #unavailable(macOS 27.0) {
                 await enforceControlItemOrder(controlItems: controlItems)
+            }
+            guard MenuBarLayoutMovePolicy.allowsDeferredSectionChange(
+                capturedGeneration: layoutGeneration,
+                currentGeneration: layoutEditorMoveGeneration,
+                isLayoutEditorMoveActive: isLayoutEditorMoveActive
+            ) else {
+                await cacheActor.clearCachedItemWindowIDs()
+                return
             }
             await uncheckedCacheItems(items: items, controlItems: controlItems, displayID: displayID)
         }
@@ -1157,6 +1188,7 @@ extension MenuBarItemManager {
         menuBarManager.iceBarPanel.close()
         menuBarManager.showOnHoverAllowed = false
         for section in menuBarManager.sections {
+            section.pauseRehideForLayoutMove()
             section.controlItem.state = .showSection
         }
 
@@ -1260,7 +1292,10 @@ extension MenuBarItemManager {
                 "LAYOUT_MOVE_PREFLIGHT_FAILED item=\(item.tag) windowID=\(item.windowID) " +
                 "target=\(destination.targetItem.tag) targetWindowID=\(destination.targetItem.windowID) " +
                 "displayID=\(displayID) sourceStable=\(sourceResult != nil) " +
-                "targetStable=\(targetResult != nil)",
+                "targetStable=\(targetResult != nil) " +
+                "source=\(layoutMoveEndpointDetails(item, displayID: displayID)) " +
+                "target=\(layoutMoveEndpointDetails(destination.targetItem, displayID: displayID)) " +
+                "states=\(appState?.menuBarManager.sections.map { "\($0.name):\($0.controlItem.state)" }.joined(separator: ",") ?? "missing")",
                 level: .warning
             )
             throw EventError.unsafeLayoutMove(item)
@@ -1271,6 +1306,14 @@ extension MenuBarItemManager {
             "displayID=\(displayID) sourceBounds=\(NSStringFromRect(source)) " +
             "targetBounds=\(NSStringFromRect(target))"
         )
+    }
+
+    private func layoutMoveEndpointDetails(_ item: MenuBarItem, displayID: CGDirectDisplayID) -> String {
+        guard let bounds = Bridging.getWindowBounds(for: item.windowID) else {
+            return "missing-window"
+        }
+        return "[bounds=\(NSStringFromRect(bounds)),onScreen=\(Bridging.isWindowOnScreen(item.windowID))," +
+            "intersectsDisplay=\(CGDisplayBounds(displayID).intersects(bounds))]"
     }
 
     /// Returns the default timeout for move operations associated
@@ -1691,21 +1734,31 @@ extension MenuBarItemManager {
         // A manual move may have completed while this request was queued.
         try request.checkValidity()
 
+        var revealContext: LayoutMoveRevealContext?
+        var revealFinishReason = "failed"
         let ownsLayoutEditorState = origin == .layoutEditor
         if ownsLayoutEditorState {
             layoutEditorMoveGeneration &+= 1
             isLayoutEditorMoveActive = true
+            // The reveal and its preflight also own the native geometry.
+            // Stopping only inside performMove leaves the two-second preflight
+            // exposed to hover and smart-rehide events from the editor drag.
+            appState.hidEventManager.stopAll()
         }
         defer {
             if ownsLayoutEditorState {
                 isLayoutEditorMoveActive = false
                 layoutEditorMoveGeneration &+= 1
+                if revealContext != nil {
+                    for section in appState.menuBarManager.sections {
+                        section.resumeRehideAfterLayoutMove()
+                    }
+                }
+                appState.hidEventManager.startAll()
                 appState.automationManager.resumeAfterLayoutEditorMove()
             }
         }
 
-        var revealContext: LayoutMoveRevealContext?
-        var revealFinishReason = "failed"
         defer {
             if let revealContext {
                 finishLayoutMoveReveal(revealContext, reason: revealFinishReason)

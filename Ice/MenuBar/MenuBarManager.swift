@@ -138,12 +138,18 @@ final class MenuBarManager: ObservableObject {
                     let screen = appState.hidEventManager.bestScreen(appState: appState),
                     !appState.hidEventManager.isMouseInsideMenuBar(appState: appState, screen: screen)
                 {
+                    let layoutGeneration = appState.itemManager.layoutEditorMoveGeneration
                     Task {
                         do {
                             try await Task.sleep(for: .seconds(0.1))
                         } catch {
                             return
                         }
+                        guard MenuBarLayoutMovePolicy.allowsDeferredSectionChange(
+                            capturedGeneration: layoutGeneration,
+                            currentGeneration: appState.itemManager.layoutEditorMoveGeneration,
+                            isLayoutEditorMoveActive: appState.itemManager.isLayoutEditorMoveActive
+                        ) else { return }
                         hiddenSection.hide()
                     }
                 }

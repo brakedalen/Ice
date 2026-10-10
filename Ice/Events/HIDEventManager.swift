@@ -338,6 +338,7 @@ extension HIDEventManager {
         }
 
         let initialSpaceID = Bridging.getActiveSpaceID()
+        let layoutGeneration = appState.itemManager.layoutEditorMoveGeneration
 
         Task {
             // Give the window under the mouse a chance to focus.
@@ -346,6 +347,12 @@ extension HIDEventManager {
             } catch {
                 return
             }
+
+            guard MenuBarLayoutMovePolicy.allowsDeferredSectionChange(
+                capturedGeneration: layoutGeneration,
+                currentGeneration: appState.itemManager.layoutEditorMoveGeneration,
+                isLayoutEditorMoveActive: appState.itemManager.isLayoutEditorMoveActive
+            ) else { return }
 
             // Don't bother checking the window if the click caused
             // a space change.
@@ -688,6 +695,7 @@ extension HIDEventManager {
         }
 
         let delay = appState.settings.advanced.showOnHoverDelay
+        let layoutGeneration = appState.itemManager.layoutEditorMoveGeneration
 
         if hiddenSection.isHidden {
             guard
@@ -705,6 +713,11 @@ extension HIDEventManager {
                 } catch {
                     return
                 }
+                guard MenuBarLayoutMovePolicy.allowsDeferredSectionChange(
+                    capturedGeneration: layoutGeneration,
+                    currentGeneration: appState.itemManager.layoutEditorMoveGeneration,
+                    isLayoutEditorMoveActive: appState.itemManager.isLayoutEditorMoveActive
+                ), appState.menuBarManager.showOnHoverAllowed else { return }
                 // Make sure the mouse is still inside.
                 guard isMouseInsideEmptyMenuBarSpace(appState: appState, screen: screen) else {
                     return
@@ -724,6 +737,11 @@ extension HIDEventManager {
                 } catch {
                     return
                 }
+                guard MenuBarLayoutMovePolicy.allowsDeferredSectionChange(
+                    capturedGeneration: layoutGeneration,
+                    currentGeneration: appState.itemManager.layoutEditorMoveGeneration,
+                    isLayoutEditorMoveActive: appState.itemManager.isLayoutEditorMoveActive
+                ) else { return }
                 // Make sure the mouse is still outside.
                 guard
                     !isMouseInsideMenuBar(appState: appState, screen: screen),

@@ -259,6 +259,14 @@ final class ControlItem {
             .store(in: &c)
 
         if let appState {
+            appState.itemManager.$isLayoutEditorMoveActive
+                .removeDuplicates()
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    self?.updateStatusItem()
+                }
+                .store(in: &c)
+
             appState.$isDraggingMenuBarItem
                 .removeDuplicates()
                 .receive(on: DispatchQueue.main)
@@ -390,7 +398,8 @@ final class ControlItem {
                     button.appearsDisabled = true
                     button.isHighlighted = false
 
-                    if appState.isDraggingMenuBarItem && appState.settings.advanced.showAllSectionsOnUserDrag {
+                    if appState.itemManager.isLayoutEditorMoveActive ||
+                        (appState.isDraggingMenuBarItem && appState.settings.advanced.showAllSectionsOnUserDrag) {
                         // We still want a subtle marker between sections.
                         button.title = "|"
                     }
@@ -434,13 +443,24 @@ final class ControlItem {
             let showOnDrag = appState.settings.advanced.showAllSectionsOnUserDrag
             let isDragging = appState.isDraggingMenuBarItem
 
-            let shouldShow = showOnDrag && isDragging
+            let usesNativeMenuBar: Bool
+            if #available(macOS 27.0, *) {
+                usesNativeMenuBar = false
+            } else {
+                usesNativeMenuBar = true
+            }
+            let length = MenuBarLayoutMovePolicy.collapsedDividerLength(
+                usesNativeMenuBar: usesNativeMenuBar,
+                isLayoutEditorMoveActive: appState.itemManager.isLayoutEditorMoveActive,
+                showOnDrag: showOnDrag,
+                isDragging: isDragging
+            )
 
             constraint?.isActive = false
-            statusItem.length = shouldShow ? 3 : 0
+            statusItem.length = length
 
             if let window {
-                let size = withMutableCopy(of: window.frame.size) { $0.width = shouldShow ? 3 : 1 }
+                let size = withMutableCopy(of: window.frame.size) { $0.width = max(length, 1) }
                 window.setContentSize(size)
             }
         }

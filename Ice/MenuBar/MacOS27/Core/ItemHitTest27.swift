@@ -4,6 +4,9 @@
 //
 
 import Foundation
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
 #if canImport(Darwin)
 import Darwin
 #else
