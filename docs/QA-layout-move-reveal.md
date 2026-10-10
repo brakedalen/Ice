@@ -118,3 +118,54 @@ Midlertidige kontrollartefakter ligger i `/private/tmp/`:
 6. På macOS 27: kontroller lagrede appseksjoner og regresjonspunktene i
    [MACOS27.md](../MACOS27.md), spesielt seksjonsdrag, systemklikk og flere
    ikoner fra samme app. Native draing skal ikke bli valgt på macOS 27.
+
+## Nye loggfunn kl. 17:43 og andre retting
+
+Klokkeslett her er Oslo-tid (loggens tid er UTC). Den kjørende prosessen er
+`/Applications/Ice.app`, vanlig **b17 / 1155**. Verken den utvidede diagnostikken
+eller `MenuBarLayoutMovePolicy` fra første feilretting finnes i dette bygget.
+Å oppdatere til vanlig b17 installerer altså ikke feilrettingsbranchen.
+
+Det nyeste Magnet → Wi-Fi-forsøket viser:
+
+- Preflight består: kilde x=1394, mål x=728, begge 25 × 39 punkter.
+- Draingen sendes.
+- Etterkontrollen kaster `missingItemBounds`, mens feilrapporten samtidig
+  bekrefter `sourceExists=true targetExists=true`.
+- Etter gjen-skjuling blir Magnet registrert i Always-Hidden.
+
+Koden forklarer den uriktige «mangler»-feilen: `visibleLayout` kalte
+`getMenuBarItems(on: displayID, ...)`. Den funksjonen **legger automatisk til
+`.onScreen`** når en skjerm-ID er gitt. Et ikon som faller ut av den synlige
+listen under macOS' relayout blir dermed behandlet som et forsvunnet vindu.
+Den tidligere rettingen av reveal alene dekket ikke denne etterkontrollen.
+
+Etterkontrollen bruker nå den eksisterende, felles lesingen av **to konkrete
+vindus-ID-er i én snapshot**, inkludert skjulte vinduer. Det kreves riktig
+nabokant på riktig side; eksisterende vinduer i feil posisjon godtas ikke.
+Layoutflytting krever også 200 ms sammenhengende korrekt plassering før den
+meldes ferdig. Intern flytting beholder sin umiddelbare posisjonskontroll.
+Alle sikkerhetskrav før nye drahendelser beholdes. macOS 27-seksjonsdrag bruker
+fortsatt sin separate lagrede app-layout.
+
+[Apple: CGWindowListCreateDescriptionFromArray](https://developer.apple.com/documentation/coregraphics/cgwindowlistcreatedescriptionfromarray(_:))
+beskriver oppslag med konkrete vindus-ID-er og at faktisk fjernede vinduer
+utelates. Dette er API-et den eksisterende snapshot-lesingen bruker.
+
+Fem nye regresjonstester dekker et korrekt dropp som forsvinner fra den
+synlige listen, feil plassering og stabiliseringsintervallet. Sammen med de
+åtte første testene er disse kjørt isolert mot de faktiske produksjonsfilene
+`MenuBarMoveSafety` og `MenuBarLayoutMovePolicy`: **13 bestått, 0 feil**.
+Swift-parseren og streng SwiftLint på de endrede produksjonsfilene bestod.
+
+Et bygg med begge rettingene logger `policy=native-bounds-v2` i
+`LAYOUT_MOVE_REVEAL_START`. Det gjør det mulig å kontrollere at den kjørende
+appen faktisk inneholder feilrettingene, selv om versjonsnummeret er b17.
+Full appbygging og manuell funksjonskontroll er fortsatt nødvendig.
+
+En branch-avgrenset GitHub Actions-jobb bygger og tester både på `macos-26`
+og `xcode-27`. Den bruker den inerte Debug-testverten og lager en usignert
+universell Release-app med begge rettingene. Den krever ingen signeringsnøkler.
+macOS 27-runneren er beskrevet i
+[GitHubs offisielle runner-kunngjøring](https://github.com/actions/runner-images/issues/14404).
+Resultatene må leses før bygget kan regnes som verifisert.

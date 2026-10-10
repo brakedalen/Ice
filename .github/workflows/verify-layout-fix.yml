@@ -1,0 +1,63 @@
+name: Verify layout move fix
+
+on:
+  push:
+    branches: [codex/fix-layout-move-reveal]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Build and test on ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, xcode-27]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record environment
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcodebuild -showsdks
+      - name: Test macOS 27 core
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tee core-tests.log
+      - name: Test native app with inert Debug host
+        run: |
+          set -o pipefail
+          xcodebuild test -project Ice.xcodeproj -scheme Ice \
+            -configuration Debug -destination 'platform=macOS' \
+            -derivedDataPath build/QA \
+            -onlyUsePackageVersionsFromResolvedFile \
+            -resultBundlePath build/LayoutFixTests.xcresult \
+            CODE_SIGNING_ALLOWED=NO \
+            PRODUCT_BUNDLE_IDENTIFIER=com.brakedalen.Ice.LayoutFixQA \
+            2>&1 | tee native-tests.log
+      - name: Build universal Release app
+        run: |
+          set -o pipefail
+          xcodebuild build -project Ice.xcodeproj -scheme Ice \
+            -configuration Release -destination 'generic/platform=macOS' \
+            -derivedDataPath build/QA \
+            -onlyUsePackageVersionsFromResolvedFile \
+            CODE_SIGNING_ALLOWED=NO ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO \
+            2>&1 | tee release-build.log
+          ditto -c -k --sequesterRsrc --keepParent \
+            build/QA/Build/Products/Release/Ice.app Ice-layout-fix.zip
+      - name: Save build and test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: layout-fix-${{ matrix.runner }}
+          retention-days: 7
+          path: |
+            *-tests.log
+            release-build.log
+            build/LayoutFixTests.xcresult
+            Ice-layout-fix.zip

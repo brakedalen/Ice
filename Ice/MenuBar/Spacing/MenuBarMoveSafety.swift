@@ -16,6 +16,28 @@ enum MenuBarMoveSafety {
         case right
     }
 
+    /// A correct intermediate frame is not enough while AppKit is reflowing.
+    struct PositionStability {
+        let minimumDuration: Duration
+        private var correctSince: Duration?
+
+        init(minimumDuration: Duration) {
+            self.minimumDuration = minimumDuration
+        }
+
+        mutating func observe(isCorrect: Bool, elapsed: Duration) -> Bool {
+            guard isCorrect else {
+                correctSince = nil
+                return false
+            }
+            if correctSince == nil {
+                correctSince = elapsed
+            }
+            guard let correctSince else { return false }
+            return elapsed - correctSince >= minimumDuration
+        }
+    }
+
     /// Returns whether a synthesized move is fully contained by one display.
     static func endpointsAreSafe(
         start: CGPoint,

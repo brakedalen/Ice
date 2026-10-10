@@ -1198,7 +1198,7 @@ extension MenuBarItemManager {
         diagnosticLogger.write(
             "LAYOUT_MOVE_REVEAL_START item=\(item.tag) windowID=\(item.windowID) " +
             "target=\(destination.targetItem.tag) targetWindowID=\(destination.targetItem.windowID) " +
-            "displayID=\(displayID)"
+            "displayID=\(displayID) policy=native-bounds-v2"
         )
         return LayoutMoveRevealContext(
             originalStates: originalStates,
@@ -1426,40 +1426,13 @@ extension MenuBarItemManager {
         }
 
         switch verification {
-        case .visibleLayout(let displayID):
-            // Layout-editor endpoints are deliberately revealed on one display.
-            // Ordinal verification is robust while the menu bar reflows and
-            // remains independent of the user's status-item spacing setting.
-            let items = await MenuBarItem
-                .getMenuBarItems(
-                    on: displayID,
-                    option: .activeSpace,
-                    resolveSourcePID: false
-                )
-                .sorted {
-                    if $0.bounds.minX == $1.bounds.minX {
-                        return $0.windowID < $1.windowID
-                    }
-                    return $0.bounds.minX < $1.bounds.minX
-                }
-            let orderedWindowIDs = items.map(\.windowID)
-            guard orderedWindowIDs.contains(item.windowID) else {
-                throw EventError.missingItemBounds(item)
-            }
-            guard orderedWindowIDs.contains(destination.targetItem.windowID) else {
-                throw EventError.missingItemBounds(destination.targetItem)
-            }
-            return MenuBarMoveSafety.hasImmediateNeighbor(
-                itemWindowID: item.windowID,
-                targetWindowID: destination.targetItem.windowID,
-                orderedWindowIDs: orderedWindowIDs,
-                side: side
-            )
-
-        case .liveWindowBounds:
-            // Hidden and always-hidden items are parked outside all displays.
-            // Read only the two exact window IDs in one snapshot; this avoids
-            // both the on-screen filter and cross-display ordering ambiguity.
+        case .visibleLayout, .liveWindowBounds:
+            // A successful drop can move an item behind the notch or into
+            // overflow. A display-scoped item enumeration implicitly filters
+            // on-screen windows and then falsely reports missingItemBounds.
+            // Visibility is required before posting events, not afterwards.
+            // Verify the two exact windows together, including parked items;
+            // never substitute another instance with the same tag.
             let bounds = try await getMoveBoundsSnapshot(
                 item: item,
                 target: destination.targetItem
@@ -1483,25 +1456,36 @@ extension MenuBarItemManager {
         timeout: Duration = .milliseconds(500)
     ) async throws -> Bool {
         let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
+        let startedAt = clock.now
+        let deadline = startedAt.advanced(by: timeout)
+        let minimumDuration: Duration = switch verification {
+        case .visibleLayout: .milliseconds(200)
+        case .liveWindowBounds: .zero
+        }
+        var stability = MenuBarMoveSafety.PositionStability(minimumDuration: minimumDuration)
 
         repeat {
             try Task.checkCancellation()
-            if try await itemHasCorrectPosition(
+            let isCorrect = try await itemHasCorrectPosition(
                 item: item,
                 for: destination,
                 verification: verification
+            )
+            if stability.observe(
+                isCorrect: isCorrect,
+                elapsed: startedAt.duration(to: clock.now)
             ) {
                 return true
             }
             try await Task.sleep(for: .milliseconds(10))
         } while clock.now < deadline
 
-        return try await itemHasCorrectPosition(
+        let isCorrect = try await itemHasCorrectPosition(
             item: item,
             for: destination,
             verification: verification
         )
+        return stability.observe(isCorrect: isCorrect, elapsed: startedAt.duration(to: clock.now))
     }
 
     /// Waits for a menu bar item to respond to a series of previously
