@@ -128,8 +128,12 @@ enum MenuBarMoveSafety {
             targetBounds.height > 0,
             [
                 itemBounds.minX, itemBounds.maxX,
+                itemBounds.minY, itemBounds.maxY,
                 targetBounds.minX, targetBounds.maxX,
-            ].allSatisfy(\.isFinite)
+                targetBounds.minY, targetBounds.maxY,
+            ].allSatisfy(\.isFinite),
+            abs(itemBounds.minY - targetBounds.minY) <= tolerance,
+            abs(itemBounds.maxY - targetBounds.maxY) <= tolerance
         else {
             return false
         }

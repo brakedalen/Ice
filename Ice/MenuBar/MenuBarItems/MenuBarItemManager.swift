@@ -1856,7 +1856,12 @@ extension MenuBarItemManager {
             verification: verification
         )
         try request.checkValidity()
-        guard !alreadyCorrect else {
+        if alreadyCorrect, try await waitForMoveToSettle(
+            item: item,
+            at: destination,
+            verification: verification
+        ) {
+            try request.checkValidity()
             logger.debug("Item has correct position, cancelling move")
             return
         }
@@ -1871,7 +1876,12 @@ extension MenuBarItemManager {
                     verification: verification
                 )
                 try request.checkValidity()
-                if isCorrect {
+                if isCorrect, try await waitForMoveToSettle(
+                    item: item,
+                    at: destination,
+                    verification: verification
+                ) {
+                    try request.checkValidity()
                     logger.debug("Item has correct position, finished with move")
                     return
                 }

@@ -41,6 +41,22 @@ final class MenuBarMoveVerificationTests: XCTestCase {
         XCTAssertTrue(stability.observe(isCorrect: true, elapsed: .milliseconds(200)))
     }
 
+    func testRejectsTouchingHorizontalEdgesOnDifferentMenuBars() {
+        XCTAssertFalse(MenuBarMoveSafety.edgesAreAdjacent(
+            itemBounds: CGRect(x: 703, y: 1_169, width: 25, height: 39),
+            targetBounds: CGRect(x: 728, y: 0, width: 25, height: 39),
+            side: .left
+        ))
+    }
+
+    func testRejectsNonFiniteVerticalGeometry() {
+        XCTAssertFalse(MenuBarMoveSafety.edgesAreAdjacent(
+            itemBounds: CGRect(x: 703, y: CGFloat.nan, width: 25, height: 39),
+            targetBounds: CGRect(x: 728, y: 0, width: 25, height: 39),
+            side: .left
+        ))
+    }
+
     func testTransientCorrectPositionDoesNotConfirmMove() {
         var stability = MenuBarMoveSafety.PositionStability(minimumDuration: .milliseconds(200))
         XCTAssertFalse(stability.observe(isCorrect: true, elapsed: .zero))

@@ -142,7 +142,8 @@ Den tidligere rettingen av reveal alene dekket ikke denne etterkontrollen.
 
 Etterkontrollen bruker nå den eksisterende, felles lesingen av **to konkrete
 vindus-ID-er i én snapshot**, inkludert skjulte vinduer. Det kreves riktig
-nabokant på riktig side; eksisterende vinduer i feil posisjon godtas ikke.
+nabokant på riktig side og samme vertikale menylinje; eksisterende vinduer i
+feil posisjon eller på en annen menylinje godtas ikke.
 Layoutflytting krever også 200 ms sammenhengende korrekt plassering før den
 meldes ferdig. Intern flytting beholder sin umiddelbare posisjonskontroll.
 Alle sikkerhetskrav før nye drahendelser beholdes. macOS 27-seksjonsdrag bruker
@@ -152,10 +153,11 @@ fortsatt sin separate lagrede app-layout.
 beskriver oppslag med konkrete vindus-ID-er og at faktisk fjernede vinduer
 utelates. Dette er API-et den eksisterende snapshot-lesingen bruker.
 
-Fem nye regresjonstester dekker et korrekt dropp som forsvinner fra den
-synlige listen, feil plassering og stabiliseringsintervallet. Sammen med de
+Sju nye regresjonstester dekker et korrekt dropp som forsvinner fra den
+synlige listen, feil plassering, annen menylinje, ugyldig geometri og
+stabiliseringsintervallet. Sammen med de
 åtte første testene er disse kjørt isolert mot de faktiske produksjonsfilene
-`MenuBarMoveSafety` og `MenuBarLayoutMovePolicy`: **13 bestått, 0 feil**.
+`MenuBarMoveSafety` og `MenuBarLayoutMovePolicy`: **15 bestått, 0 feil**.
 Swift-parseren og streng SwiftLint på de endrede produksjonsfilene bestod.
 
 Et bygg med begge rettingene logger `policy=native-bounds-v2` i
