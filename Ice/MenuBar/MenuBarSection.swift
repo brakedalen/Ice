@@ -289,22 +289,22 @@ final class MenuBarSection {
                             return
                         }
                         if NSEvent.mouseLocation.y < screen.visibleFrame.maxY {
-                            Task {
+                            Task { @MainActor in
                                 guard MenuBarLayoutMovePolicy.allowsDeferredSectionChange(
                                     capturedGeneration: layoutGeneration,
                                     currentGeneration: appState.itemManager.layoutEditorMoveGeneration,
                                     isLayoutEditorMoveActive: appState.itemManager.isLayoutEditorMoveActive
                                 ) else { return }
-                                await self.hide()
+                                self.hide()
                             }
                         } else {
-                            Task {
+                            Task { @MainActor in
                                 guard MenuBarLayoutMovePolicy.allowsDeferredSectionChange(
                                     capturedGeneration: layoutGeneration,
                                     currentGeneration: appState.itemManager.layoutEditorMoveGeneration,
                                     isLayoutEditorMoveActive: appState.itemManager.isLayoutEditorMoveActive
                                 ) else { return }
-                                await self.startRehideChecks()
+                                self.startRehideChecks()
                             }
                         }
                     }
