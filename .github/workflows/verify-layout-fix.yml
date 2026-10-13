@@ -1,8 +1,8 @@
-name: Verify layout move fix
+name: Build and test (macOS 26 + 27)
 
 on:
   push:
-    branches: [codex/fix-layout-move-reveal]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
