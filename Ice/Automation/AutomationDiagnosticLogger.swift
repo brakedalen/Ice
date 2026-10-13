@@ -56,6 +56,18 @@ final class AutomationDiagnosticLogger: @unchecked Sendable {
         // system load must not look like delays in a move or cursor release.
         let occurredAt = Date()
 
+        // File-only diagnostics were absent from Xcode's console. Emit failures
+        // with their real severity and public fields while keeping routine
+        // capture/performance traffic in the file log.
+        switch level {
+        case .info:
+            break
+        case .warning:
+            logger.warning("[Ice diagnostics] \(sanitized, privacy: .public)")
+        case .error:
+            logger.error("[Ice diagnostics] \(sanitized, privacy: .public)")
+        }
+
         queue.async { [self] in
             let timestamp = Self.timestampFormatter.string(from: occurredAt)
             let line = "\(timestamp) [\(level.rawValue)] \(sanitized)\n"

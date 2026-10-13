@@ -1308,12 +1308,111 @@ extension MenuBarItemManager {
         )
     }
 
+    /// Converts AppKit's bottom-up screen rectangles to WindowServer coordinates.
+    private func layoutMoveScreenRect(_ rect: CGRect, on screen: NSScreen) -> CGRect {
+        let displayBounds = CGDisplayBounds(screen.displayID)
+        return CGRect(
+            x: displayBounds.minX + rect.minX - screen.frame.minX,
+            y: displayBounds.minY + screen.frame.maxY - rect.maxY,
+            width: rect.width,
+            height: rect.height
+        )
+    }
+
     private func layoutMoveEndpointDetails(_ item: MenuBarItem, displayID: CGDirectDisplayID) -> String {
+        let identity = "windowID=\(item.windowID),ownerPID=\(item.ownerPID)," +
+            "sourcePID=\(item.sourcePID.map(String.init) ?? "nil"),movable=\(item.isMovable)"
         guard let bounds = Bridging.getWindowBounds(for: item.windowID) else {
-            return "missing-window"
+            return "[\(identity),reason=missing-window]"
         }
-        return "[bounds=\(NSStringFromRect(bounds)),onScreen=\(Bridging.isWindowOnScreen(item.windowID))," +
-            "intersectsDisplay=\(CGDisplayBounds(displayID).intersects(bounds))]"
+        let onScreen = Bridging.isWindowOnScreen(item.windowID)
+        let intersectsDisplay = CGDisplayBounds(displayID).intersects(bounds)
+        var screenDetails = ""
+        if let screen = NSScreen.screens.first(where: { $0.displayID == displayID }) {
+            if let notch = screen.frameOfNotch {
+                screenDetails += ",overlapsNotch=\(layoutMoveScreenRect(notch, on: screen).intersects(bounds))"
+            }
+            if let rightArea = screen.auxiliaryTopRightArea {
+                let area = layoutMoveScreenRect(rightArea, on: screen)
+                screenDetails += ",insideRightMenuArea=\(bounds.minX >= area.minX && bounds.maxX <= area.maxX)"
+            }
+        }
+        let reason: String
+        if bounds.width <= 0 || bounds.height <= 0 {
+            reason = "empty-bounds"
+        } else if !intersectsDisplay {
+            reason = "outside-display"
+        } else if !onScreen {
+            reason = "window-not-visible"
+        } else {
+            reason = "visible-now"
+        }
+        return "[\(identity),bounds=\(NSStringFromRect(bounds)),onScreen=\(onScreen)," +
+            "intersectsDisplay=\(intersectsDisplay)," +
+            "onActiveSpace=\(Bridging.isWindowOnSpace(item.windowID, Bridging.getActiveSpaceID()))," +
+            "reason=\(reason)\(screenDetails)]"
+    }
+
+    /// Captures failure state before the reveal's defer restores the sections.
+    /// This is emitted to both the file log and Xcode's console.
+    private func logMoveFailureContext(
+        moveID: String,
+        phase: String,
+        item: MenuBarItem,
+        destination: MoveDestination,
+        displayID: CGDirectDisplayID?,
+        error: Error
+    ) {
+        let permissions = appState?.permissions
+        diagnosticLogger.write(
+            "MOVE_FAILURE_CONTEXT moveID=\(moveID) phase=\(phase) destination=\(destination.logString) " +
+            "accessibility=\(permissions?.accessibility.hasPermission.description ?? "unknown") " +
+            "screenRecording=\(permissions?.screenRecording.hasPermission.description ?? "unknown") " +
+            "layoutActive=\(isLayoutEditorMoveActive) generation=\(layoutEditorMoveGeneration) " +
+            "cachedItems=\(itemCache.managedItems.count) " +
+            "os=\(ProcessInfo.processInfo.operatingSystemVersionString) " +
+            "appPath=\(Bundle.main.bundleURL.path) " +
+            "description=\(error.localizedDescription)",
+            level: .error
+        )
+        if let displayID {
+            diagnosticLogger.write(
+                "MOVE_FAILURE_SOURCE moveID=\(moveID) item=\(item.tag) " +
+                "details=\(layoutMoveEndpointDetails(item, displayID: displayID))",
+                level: .error
+            )
+            diagnosticLogger.write(
+                "MOVE_FAILURE_TARGET moveID=\(moveID) item=\(destination.targetItem.tag) " +
+                "details=\(layoutMoveEndpointDetails(destination.targetItem, displayID: displayID))",
+                level: .error
+            )
+            let screen = NSScreen.screens.first { $0.displayID == displayID }
+            let rightArea = screen.flatMap { screen in
+                screen.auxiliaryTopRightArea.map { layoutMoveScreenRect($0, on: screen) }
+            }
+            diagnosticLogger.write(
+                "MOVE_FAILURE_SCREEN moveID=\(moveID) displayID=\(displayID) " +
+                "bounds=\(NSStringFromRect(CGDisplayBounds(displayID))) " +
+                "hasNotch=\(screen?.hasNotch.description ?? "unknown") " +
+                "rightMenuArea=\(rightArea.map(NSStringFromRect) ?? "none") " +
+                "activeSpace=\(Bridging.getActiveSpaceID())",
+                level: .error
+            )
+        }
+        for section in appState?.menuBarManager.sections ?? [] {
+            let controlItem = section.controlItem
+            let bounds = controlItem.window.flatMap { window -> CGRect? in
+                guard let windowID = CGWindowID(exactly: window.windowNumber), windowID != 0 else {
+                    return nil
+                }
+                return Bridging.getWindowBounds(for: windowID)
+            }
+            diagnosticLogger.write(
+                "MOVE_FAILURE_SECTION moveID=\(moveID) section=\(section.name) " +
+                "state=\(controlItem.state) bounds=\(bounds.map(NSStringFromRect) ?? "missing-window")",
+                level: .error
+            )
+        }
     }
 
     /// Returns the default timeout for move operations associated
@@ -1718,6 +1817,8 @@ extension MenuBarItemManager {
         // A manual move may have completed while this request was queued.
         try request.checkValidity()
 
+        let moveID = UUID().uuidString
+        var movePhase = "prepare"
         var revealContext: LayoutMoveRevealContext?
         var revealFinishReason = "failed"
         let ownsLayoutEditorState = origin == .layoutEditor
@@ -1750,7 +1851,7 @@ extension MenuBarItemManager {
         }
 
         diagnosticLogger.write(
-            "MOVE_START origin=\(origin.rawValue) item=\(item.tag) windowID=\(item.windowID) " +
+            "MOVE_START origin=\(origin.rawValue) moveID=\(moveID) item=\(item.tag) windowID=\(item.windowID) " +
             "sourcePID=\(item.sourcePID.map(String.init) ?? "nil") " +
             "target=\(destination.targetItem.tag) targetWindowID=\(destination.targetItem.windowID) " +
             "itemSpacer=\(item.tag.isIceSpacer) targetSpacer=\(destination.targetItem.tag.isIceSpacer)"
@@ -1758,8 +1859,10 @@ extension MenuBarItemManager {
 
         do {
             if origin == .layoutEditor {
+                movePhase = "reveal"
                 let context = try beginLayoutMoveReveal(item: item, destination: destination)
                 revealContext = context
+                movePhase = "preflight"
                 try await prepareSafeLayoutMove(
                     item: item,
                     destination: destination,
@@ -1775,6 +1878,7 @@ extension MenuBarItemManager {
                 verification = .liveWindowBounds
             }
 
+            movePhase = "native-move"
             try await performMove(
                 item: item,
                 to: destination,
@@ -1798,12 +1902,21 @@ extension MenuBarItemManager {
                 throw error
             }
             diagnosticLogger.write(
-                "MOVE_FAILURE origin=\(origin.rawValue) item=\(item.tag) windowID=\(item.windowID) " +
+                "MOVE_FAILURE origin=\(origin.rawValue) moveID=\(moveID) phase=\(movePhase) " +
+                "item=\(item.tag) windowID=\(item.windowID) " +
                 "target=\(destination.targetItem.tag) targetWindowID=\(destination.targetItem.windowID) " +
                 "sourceExists=\(Bridging.getWindowBounds(for: item.windowID) != nil) " +
                 "targetExists=\(Bridging.getWindowBounds(for: destination.targetItem.windowID) != nil) " +
                 "error=\(String(describing: error))",
                 level: .error
+            )
+            logMoveFailureContext(
+                moveID: moveID,
+                phase: movePhase,
+                item: item,
+                destination: destination,
+                displayID: revealContext?.displayID ?? itemCache.displayID ?? NSScreen.screenWithActiveMenuBar?.displayID,
+                error: error
             )
             throw error
         }

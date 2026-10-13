@@ -136,7 +136,12 @@ final class LayoutBarPaddingView: NSView {
             } catch is CancellationError {
                 return
             } catch {
-                Logger.default.error("Error moving menu bar item: \(error, privacy: .public)")
+                AutomationDiagnosticLogger.shared.write(
+                    "LAYOUT_EDITOR_MOVE_FAILED item=\(item.tag) windowID=\(item.windowID) " +
+                    "target=\(destination.targetItem.tag) targetWindowID=\(destination.targetItem.windowID) " +
+                    "destination=\(destination.logString) error=\(String(describing: error))",
+                    level: .error
+                )
                 let alert = NSAlert(error: error)
                 alert.runModal()
             }
