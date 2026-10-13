@@ -72,4 +72,58 @@ final class MenuBarLayoutMovePolicyTests: XCTestCase {
             capturedGeneration: 8, currentGeneration: 8, isLayoutEditorMoveActive: false
         ))
     }
+
+    private let app = MenuBarItemTag(namespace: .string("com.lujjjh.LinearMouse"), title: "Item-0")
+    private let wifi = MenuBarItemTag(namespace: .controlCenter, title: "WiFi")
+
+    func testRevealOnlyExposesEndpointSections() {
+        XCTAssertEqual(MenuBarLayoutMovePolicy.revealDepth(
+            source: (app, .visible),
+            target: (wifi, .visible)
+        ), .visible)
+        XCTAssertEqual(MenuBarLayoutMovePolicy.revealDepth(
+            source: (app, .hidden),
+            target: (wifi, .visible)
+        ), .hidden)
+        XCTAssertEqual(MenuBarLayoutMovePolicy.revealDepth(
+            source: (app, .visible),
+            target: (wifi, .alwaysHidden)
+        ), .alwaysHidden)
+    }
+
+    func testDividerTargetsExposeSectionOnTheirLeft() {
+        XCTAssertEqual(MenuBarLayoutMovePolicy.revealDepth(
+            source: (app, .visible),
+            target: (.hiddenControlItem, nil)
+        ), .hidden)
+        XCTAssertEqual(MenuBarLayoutMovePolicy.revealDepth(
+            source: (app, .visible),
+            target: (.alwaysHiddenControlItem, nil)
+        ), .alwaysHidden)
+        XCTAssertEqual(MenuBarLayoutMovePolicy.revealDepth(
+            source: (app, .visible),
+            target: (.visibleControlItem, nil)
+        ), .visible)
+    }
+
+    func testUnknownEndpointRevealsEverything() {
+        XCTAssertEqual(MenuBarLayoutMovePolicy.revealDepth(
+            source: (app, nil),
+            target: (wifi, .visible)
+        ), .alwaysHidden)
+    }
+
+    func testRevealDepthIncludesSectionsToTheRight() {
+        let depth = MenuBarLayoutMovePolicy.RevealDepth.hidden
+        XCTAssertTrue(depth.reveals(.visible))
+        XCTAssertTrue(depth.reveals(.hidden))
+        XCTAssertFalse(depth.reveals(.alwaysHidden))
+    }
+
+    func testControlCenterNeverFallsBackOffscreen() {
+        let other = MenuBarItemTag(namespace: .string("com.openai.codex"), title: "Item-0")
+        XCTAssertTrue(MenuBarLayoutMovePolicy.allowsOffscreenFallback(sourceTag: app, targetTag: other))
+        XCTAssertFalse(MenuBarLayoutMovePolicy.allowsOffscreenFallback(sourceTag: app, targetTag: wifi))
+        XCTAssertFalse(MenuBarLayoutMovePolicy.allowsOffscreenFallback(sourceTag: wifi, targetTag: app))
+    }
 }

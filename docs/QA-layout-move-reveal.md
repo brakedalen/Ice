@@ -189,3 +189,62 @@ universell Release-app med begge rettingene. Den krever ingen signeringsnøkler.
 macOS 27-runneren er beskrevet i
 [GitHubs offisielle runner-kunngjøring](https://github.com/actions/runner-images/issues/14404).
 Begge jobbene er fullført og resultatene er lest; se verifikasjonen ovenfor.
+
+## Tredje retting, 13. oktober 2026: plassmangel ved notch
+
+### Funn
+
+Dialogen «Could not find a safe on-screen path» kom ved nesten hver flytting.
+Loggen viste `LAYOUT_MOVE_PREFLIGHT_FAILED` og `LAYOUT_MOVE_GEOMETRY_REJECTED`
+med `onScreen=false` for kilden eller målet. Skjermen er 1800 pt bred med notch.
+Feltet til høyre for notchen (`rightMenuArea`) starter på x=1010 og er 790 pt
+bredt. Reveal satte **alle tre seksjonene** til `showSection`. Med 38 ikoner
+på rundt 25 pt hver trengs omtrent 950 pt. macOS skjøv derfor ikonene lengst
+til venstre bak notchen, for eksempel LinearMouse på x=717 og Codex på x=692.
+Sikkerhetskravet om synlige endepunkter avviste da flyttingen hver gang.
+Sikkerhetskravet var riktig. Feilen lå i å vise alt.
+
+### Endringen
+
+- **Minimal reveal** (`MenuBarLayoutMovePolicy.revealDepth`): Ice viser bare
+  seksjonene kilden og målet ligger i, pluss seksjonene til høyre for dem.
+  Seksjoner lenger til venstre settes midlertidig til `hideSection`, og alt
+  gjenopprettes etterpå som før. Skilletegn krever seksjonen til venstre for
+  seg. Ukjente endepunkter som ikke finnes i cachen gir full reveal, som før.
+- **Reserveløsning utenfor skjermen**: Hvis reveal, preflight eller geometri
+  likevel gir `unsafeLayoutMove`, avsluttes reveal. Flyttingen gjøres da
+  utenfor skjermen med `liveWindowBounds`, samme metode som interne flyttinger
+  alltid har brukt. Dette er **sperret når kilde eller mål tilhører Control
+  Center** (`com.apple.controlcenter`), fordi slipp utenfor skjermen kan fjerne
+  slike ikoner. Da vises dialogen som før.
+- Tidsstyrt rehide gjenopptas først når hele flyttingen er ferdig, også ved
+  reserveløsningen.
+- Ny loggmarkør: `policy=native-bounds-v3` og `depth=visible|hidden|alwaysHidden`
+  i `LAYOUT_MOVE_REVEAL_START`. Reserveløsningen logges som
+  `LAYOUT_MOVE_OFFSCREEN_FALLBACK` og `LAYOUT_MOVE_REVEAL_FINISH
+  reason=offscreen-fallback`.
+
+### Verifikasjon
+
+- Fem nye XCTest-tester for reveal-dybde, skilletegn, ukjente endepunkter og
+  Control Center-sperren. **Hele appens 79 tester bestått**, 0 feil, lokalt med
+  `xcodebuild test` på macOS 26.7.1.
+- **Manuell funksjonstest i Debug-bygg**, kontrollert mot loggen kl. 10:00 til
+  10:03 Oslo-tid: **34 flyttinger i layouteditoren, 33 vellykket, 1 avvist.**
+  - De fleste flyttingene viste bare `depth=visible` eller `depth=hidden`.
+  - **10 reserveløsninger, alle vellykket**, blant annet 1Password → Alfred og
+    MacWhisper → 1Password. Målet lå der på x≈1006, rett bak notchkanten.
+  - Control Center-flyttinger som Battery → coconutBattery, Sound → Dato og
+    Bluetooth → Sound lyktes på den synlige menylinjen.
+  - Ingen `restored=false`.
+  - Den ene avvisningen var OneDrive → Wi-Fi. OneDrive lå på x=957, bak
+    notchen, og målet tilhørte Control Center. Avvisningen er tilsiktet. Samme
+    flytting lyktes senere da OneDrive var synlig.
+- Enkelte flyttinger trenger to forsøk (`MOVE_POSTCONDITION_FAILURE attempt=1`
+  etterfulgt av `MOVE_SUCCESS`). Det gjaldt også før rettingen og ga ingen feil.
+
+### Kjent begrensning
+
+Når et av endepunktene tilhører Control Center og fortsatt ikke får plass
+til høyre for notchen etter minimal reveal, avvises flyttingen trygt. Brukeren
+må da frigjøre plass eller flytte ikonet i to steg.

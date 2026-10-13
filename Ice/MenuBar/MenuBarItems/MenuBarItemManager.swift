@@ -1185,11 +1185,19 @@ extension MenuBarItemManager {
         }
         let originalShowOnHoverAllowed = menuBarManager.showOnHoverAllowed
 
+        let depth = MenuBarLayoutMovePolicy.revealDepth(
+            source: (item.tag, itemCache.address(forWindowID: item.windowID)?.section),
+            target: (
+                destination.targetItem.tag,
+                itemCache.address(forWindowID: destination.targetItem.windowID)?.section
+            )
+        )
+
         menuBarManager.iceBarPanel.close()
         menuBarManager.showOnHoverAllowed = false
         for section in menuBarManager.sections {
             section.pauseRehideForLayoutMove()
-            section.controlItem.state = .showSection
+            section.controlItem.state = depth.reveals(section.name) ? .showSection : .hideSection
         }
 
         let expectedStates = menuBarManager.sections.map {
@@ -1198,7 +1206,7 @@ extension MenuBarItemManager {
         diagnosticLogger.write(
             "LAYOUT_MOVE_REVEAL_START item=\(item.tag) windowID=\(item.windowID) " +
             "target=\(destination.targetItem.tag) targetWindowID=\(destination.targetItem.windowID) " +
-            "displayID=\(displayID) policy=native-bounds-v2"
+            "displayID=\(displayID) depth=\(depth) policy=native-bounds-v3"
         )
         return LayoutMoveRevealContext(
             originalStates: originalStates,
@@ -1820,6 +1828,7 @@ extension MenuBarItemManager {
         let moveID = UUID().uuidString
         var movePhase = "prepare"
         var revealContext: LayoutMoveRevealContext?
+        var didPauseRehide = false
         var revealFinishReason = "failed"
         let ownsLayoutEditorState = origin == .layoutEditor
         if ownsLayoutEditorState {
@@ -1834,7 +1843,7 @@ extension MenuBarItemManager {
             if ownsLayoutEditorState {
                 isLayoutEditorMoveActive = false
                 layoutEditorMoveGeneration &+= 1
-                if revealContext != nil {
+                if didPauseRehide {
                     for section in appState.menuBarManager.sections {
                         section.resumeRehideAfterLayoutMove()
                     }
@@ -1858,35 +1867,68 @@ extension MenuBarItemManager {
         )
 
         do {
-            if origin == .layoutEditor {
-                movePhase = "reveal"
-                let context = try beginLayoutMoveReveal(item: item, destination: destination)
-                revealContext = context
-                movePhase = "preflight"
-                try await prepareSafeLayoutMove(
+            do {
+                if origin == .layoutEditor {
+                    movePhase = "reveal"
+                    let context = try beginLayoutMoveReveal(item: item, destination: destination)
+                    revealContext = context
+                    didPauseRehide = true
+                    movePhase = "preflight"
+                    try await prepareSafeLayoutMove(
+                        item: item,
+                        destination: destination,
+                        displayID: context.displayID
+                    )
+                    try request.checkValidity()
+                }
+
+                let verification: MovePositionVerification
+                if origin == .layoutEditor, let displayID = revealContext?.displayID {
+                    verification = .visibleLayout(displayID: displayID)
+                } else {
+                    verification = .liveWindowBounds
+                }
+
+                movePhase = "native-move"
+                try await performMove(
                     item: item,
-                    destination: destination,
-                    displayID: context.displayID
+                    to: destination,
+                    appState: appState,
+                    safeDisplayID: revealContext?.displayID,
+                    verification: verification,
+                    request: request
                 )
+            } catch EventError.unsafeLayoutMove(let unsafeItem) where origin == .layoutEditor {
+                guard MenuBarLayoutMovePolicy.allowsOffscreenFallback(
+                    sourceTag: item.tag,
+                    targetTag: destination.targetItem.tag
+                ) else {
+                    throw EventError.unsafeLayoutMove(unsafeItem)
+                }
+                // The visible menu bar has no room for both endpoints. Items
+                // outside Control Center move safely in the off-screen parking
+                // area, exactly as internal operations always move them.
+                diagnosticLogger.write(
+                    "LAYOUT_MOVE_OFFSCREEN_FALLBACK moveID=\(moveID) phase=\(movePhase) " +
+                    "item=\(item.tag) windowID=\(item.windowID) " +
+                    "target=\(destination.targetItem.tag) targetWindowID=\(destination.targetItem.windowID)",
+                    level: .warning
+                )
+                if let context = revealContext {
+                    finishLayoutMoveReveal(context, reason: "offscreen-fallback")
+                    revealContext = nil
+                }
                 try request.checkValidity()
+                movePhase = "offscreen-fallback"
+                try await performMove(
+                    item: item,
+                    to: destination,
+                    appState: appState,
+                    safeDisplayID: nil,
+                    verification: .liveWindowBounds,
+                    request: request
+                )
             }
-
-            let verification: MovePositionVerification
-            if origin == .layoutEditor, let displayID = revealContext?.displayID {
-                verification = .visibleLayout(displayID: displayID)
-            } else {
-                verification = .liveWindowBounds
-            }
-
-            movePhase = "native-move"
-            try await performMove(
-                item: item,
-                to: destination,
-                appState: appState,
-                safeDisplayID: revealContext?.displayID,
-                verification: verification,
-                request: request
-            )
             try request.checkValidity()
             revealFinishReason = "succeeded"
             diagnosticLogger.write(
